@@ -1,0 +1,12 @@
+numpy
+scipy
+pandas
+scikit-image
+nibabel
+SimpleITK
+openpyxl
+matplotlib
+tqdm
+PyYAML
+nnunetv2==2.8.1
+pytest==9.1.1
