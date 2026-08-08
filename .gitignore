@@ -8,11 +8,10 @@ PanTS/
 # ============================================================
 inputs/
 workspaces/
+nnunet/
 
-# Large generated outputs
-outputs/predictions/
-outputs/checkpoints/
-outputs/logs/
+# All generated figures, predictions, checkpoints, and logs
+outputs/
 
 # ============================================================
 # Medical imaging / ML artifacts
