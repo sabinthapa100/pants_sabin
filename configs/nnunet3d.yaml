@@ -1,0 +1,15 @@
+experiment:
+  name: nnunet3d
+  seed: 317
+
+model:
+  name: nnunet_v2
+  configuration: 3d_fullres
+  folds: [0, 1, 2, 3, 4]
+
+training:
+  trainer: nnUNetTrainer
+
+paths:
+  data_root: ${PANTS_DATA_ROOT}
+  output_root: ${PANTS_OUTPUT_ROOT}
