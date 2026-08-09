@@ -1,65 +1,108 @@
-# PanTS nnU-Net baseline
+# PanTS 3D Pancreatic Tumor Segmentation
 
-This project trains and evaluates **nnU-Net v2** for pancreatic-tumor
-segmentation using the [PanTS dataset](https://github.com/MrGiovanni/PanTS).
+A reproducible research pipeline for training, comparing, evaluating, and exporting
+3D pancreatic-tumor segmentation models on the **PanTS** dataset.
 
-The model receives a 3D abdominal CT and predicts background plus the 28 PanTS
-classes. Pancreatic lesion is label 28. The other anatomical labels provide
-useful context around the pancreas.
+The project is organized around a common data/evaluation interface so different
+model families can be compared fairly and exported through a simple inference
+workflow for external testing.
 
-## Start here
+## Study design
 
-The complete workflow is in
-[`notebooks/PanTS_nnUNet_Colab.ipynb`](notebooks/PanTS_nnUNet_Colab.ipynb).
+Three experiments are planned under the same PanTS development protocol:
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sabinthapa100/pants_sabin/blob/main/notebooks/PanTS_nnUNet_Colab.ipynb)
+| Experiment | Model | Initialization | Purpose |
+|---|---|---|---|
+| `segresnet_suprem` | 3D SegResNet | public SuPreM checkpoint | transfer-learning model |
+| `segresnet_random` | same 3D SegResNet | random | controlled pretraining ablation |
+| `nnunet3d` | nnU-Net v2 `3d_fullres` | framework default | independent strong baseline |
 
-The notebook walks through:
+The two SegResNet experiments use the **same architecture and downstream
+pipeline**. Their initialization is the controlled variable. nnU-Net is kept as
+an independent baseline because it is a self-configuring framework with its own
+planning, training, and inference machinery.
 
-1. checking the PanTS download;
-2. preparing data in nnU-Net format;
-3. fingerprinting, planning, and preprocessing;
-4. training with checkpoints;
-5. validation and prediction;
-6. Dice/IoU evaluation, including pancreatic-lesion label 28;
-7. exporting the trained nnU-Net model.
+No public model already trained on PanTS is used as the submitted model.
 
-## Project layout
+## Scientific protocol
+
+1. Keep the original PanTS data immutable.
+2. Validate NIfTI geometry, labels, and dataset metadata before training.
+3. Create a fixed PanTS-tr development split used across all experiments.
+4. Use smoke/tiny-overfit experiments to validate each pipeline before large runs.
+5. Tune model selection and post-processing using PanTS-tr development data only.
+6. Freeze the complete pipeline before evaluating on PanTS-te.
+7. Use one common evaluation implementation whenever the prediction format permits.
+8. Export one selected final model with a minimal inference interface for external OOD testing.
+
+PanTS-te is treated as a locked in-distribution evaluation set, not as a tuning set.
+
+## Repository layout
 
 ```text
 pants_sabin/
-├── PanTS/                 # original PanTS repository and data (read-only)
-├── nnUNet/                # local official nnU-Net clone (reference only)
-├── src/data/              # reusable PanTS data functions
-├── scripts/               # small data/QC commands
-├── notebooks/             # Colab nnU-Net workflow
-├── nnunet/                # generated nnU-Net data and results
-└── outputs/               # generated figures and predictions
+├── configs/                    # one experiment = one tracked configuration
+│   ├── segresnet_suprem.yaml
+│   ├── segresnet_random.yaml
+│   └── nnunet3d.yaml
+│
+├── src/
+│   ├── data/                   # PanTS paths, labels, I/O, QC, preparation
+│   ├── models/                 # in-process model definitions/factory
+│   ├── training/               # shared training/checkpoint utilities
+│   └── evaluation/             # model-agnostic metrics and inference utilities
+│
+├── scripts/                    # thin command-line entry points
+├── notebooks/                  # Colab orchestration/visualization only
+├── tests/                      # fast unit and integration tests
+├── requirements.txt
+└── README.md
 ```
 
-`PanTS/`, `nnUNet/`, `nnunet/`, and `outputs/` are ignored by Git. The official
-nnU-Net clone is only for reading its documentation and source; this project
-uses the installed `nnunetv2` package and does not copy or modify nnU-Net code.
+The notebooks are **not** the implementation. They are lightweight interfaces for
+mounting cloud storage, selecting hardware, launching scripts, and visualizing
+results. Reusable logic belongs under `src/`.
 
-## Local setup
+## PanTS ontology
+
+The current data layer tracks background plus 28 PanTS foreground classes.
+`pancreatic_lesion` is label **28**. Pancreas, pancreas head/body/tail, duct, and
+surrounding anatomy are retained as contextual supervision rather than reducing
+the task immediately to a binary mask.
+
+## SuPreM usage
+
+The transfer-learning experiment uses the publicly released **SuPreM SegResNet
+pretrained weights as initialization only**. The model is then fine-tuned on
+PanTS-tr. The same SegResNet is also trained from random initialization to
+quantify the effect of supervised 3D pretraining.
+
+The upstream SuPreM pancreatic-tumor example is treated as a methodological
+reference; PanTS-specific data handling, experiment control, evaluation,
+checkpointing, and export are implemented in this repository.
+
+Set the checkpoint location with an environment variable rather than committing
+weights:
 
 ```bash
-conda create -n pants_sabin python=3.11 -y
-conda activate pants_sabin
-
-# Install the correct PyTorch build for your GPU first.
-pip install -r requirements.txt
+export SUPREM_CHECKPOINT=/path/to/supervised_suprem_segresnet_2100.pth
 ```
 
-From the project root, set the three nnU-Net directories:
+## Data paths
+
+Raw data and model artifacts are never committed. Configure storage through
+environment variables:
 
 ```bash
-export nnUNet_raw="$PWD/nnunet/nnUNet_raw"
-export nnUNet_preprocessed="$PWD/nnunet/nnUNet_preprocessed"
-export nnUNet_results="$PWD/nnunet/nnUNet_results"
+export PANTS_DATA_ROOT=/path/to/PanTS/data
+export PANTS_OUTPUT_ROOT=/path/to/pants_outputs
 ```
 
-## Useful commands
+The official PanTS layout is case-based (`ImageTr/<case>/ct.nii.gz`,
+`LabelTr/<case>/...`). Existing utilities under `src/data/` operate on this
+case structure.
+
+## Existing data/QC tools
 
 Inspect one case:
 
@@ -67,7 +110,7 @@ Inspect one case:
 python scripts/inspect_data.py --case PanTS_00000001
 ```
 
-Visualize pancreas and lesion annotations:
+Visualize selected structures:
 
 ```bash
 python scripts/visualize_data.py \
@@ -75,7 +118,7 @@ python scripts/visualize_data.py \
   --structures pancreas pancreatic_lesion
 ```
 
-Create the 40-case smoke dataset:
+Create the deterministic balanced nnU-Net smoke dataset:
 
 ```bash
 python scripts/prepare_nnunet.py \
@@ -84,43 +127,40 @@ python scripts/prepare_nnunet.py \
   --max-cases 40
 ```
 
-## Smoke test and production training
+## Reproducibility
 
-`Dataset501_PanTSSmoke` contains 40 cases from PanTS-tr. It is used to check
-that preprocessing, training, checkpointing, inference, and evaluation all
-work. Its one-epoch results are **not benchmark results**.
-
-The final nnU-Net benchmark will use:
-
-- `Dataset500_PanTS` with all 9,000 PanTS-tr cases;
-- fixed five-fold cross-validation;
-- the standard nnU-Net trainer;
-- model selection using PanTS-tr validation predictions only;
-- five-fold ensemble inference on the 901 PanTS-te cases after the model and
-  evaluation procedure are frozen.
-
-For Colab Pro, use an A100/High-RAM runtime, train from fast `/content` storage,
-and keep checkpoints and exported models in Google Drive. If Colab runtime or
-storage limits become restrictive, the same nnU-Net commands can run on NERSC.
+SegResNet training checkpoints are designed to preserve model, optimizer,
+scheduler, precision-scaler state (when applicable), epoch/global step,
+best metric, resolved configuration, RNG states, and the producing Git commit.
+Training checkpoints and submission checkpoints are intentionally separate
+artifacts.
 
 ## Evaluation
 
-nnU-Net reports semantic Dice and IoU for every class. For this project, label
-28 must be reported separately because it represents pancreatic lesion.
+The repository currently implements model-agnostic semantic Dice utilities.
+PanTS benchmark quantities such as patient-wise sensitivity, tumor-wise
+sensitivity, specificity, and AUC will only be labeled as PanTS-compatible after
+the exact lesion-matching and threshold protocol has been verified and encoded.
+No benchmark results are fabricated or inferred from smoke experiments.
 
-The PanTS table also includes patient-wise sensitivity, tumor-wise sensitivity,
-specificity, and AUC. We will add those metrics only after their exact lesion
-matching and threshold definitions are established; until then, nnU-Net results
-are reported as internal semantic validation.
+## Current status
 
-## Data rule
+This branch is the modular refactor of the original nnU-Net-first prototype.
+Implemented so far:
 
-Never modify files inside `PanTS/`. Use PanTS-tr for development and reserve
-PanTS-te for the final locked evaluation.
+- PanTS label/path/I/O/QC utilities from the original prototype;
+- deterministic balanced nnU-Net smoke-data preparation;
+- three tracked experiment configurations;
+- shared SegResNet model factory with SuPreM or random initialization;
+- atomic resumable training-checkpoint utilities;
+- shared semantic segmentation metrics and tests.
+
+Next implementation milestone: a correct PanTS manifest/split layer followed by
+the shared MONAI SegResNet data pipeline and geometry-preserving inference CLI.
 
 ## References
 
-- [PanTS dataset](https://github.com/MrGiovanni/PanTS)
-- [nnU-Net v2](https://github.com/MIC-DKFZ/nnUNet)
-- Isensee et al., *nnU-Net: a self-configuring method for deep learning-based
-  biomedical image segmentation*, Nature Methods (2021).
+- PanTS: Li et al., NeurIPS 2025 Datasets and Benchmarks Track.
+- SuPreM / supervised 3D medical-image pretraining: Li et al.
+- nnU-Net: Isensee et al., *Nature Methods* (2021).
+- MONAI: Medical Open Network for AI.
