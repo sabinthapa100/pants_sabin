@@ -8,6 +8,7 @@ model, which is exactly what makes the pretraining comparison controlled.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any
 import torch
 from monai.losses import DiceCELoss
 
+from ..data.prepared import build_prepared_dataloaders
 from ..data.transforms import PREPROCESSING, build_dataloaders
 from ..models.segresnet import NUM_CLASSES, build_segresnet
 from .checkpoint import load_training_checkpoint, save_training_checkpoint
@@ -44,6 +46,10 @@ class TrainingConfig:
     seed: int = 317
     limit_cases: int | None = None
     max_steps_per_epoch: int | None = None
+    # When set, training reads the prepared npz cache instead of raw NIfTI.
+    # The deterministic preprocessing is identical either way; only where the
+    # work happened differs (laptop, once, versus every epoch).
+    prepared_root: str | None = None
     save_every_epochs: int = 1
     amp: bool = True
     device: str = "cuda"
@@ -114,17 +120,28 @@ class SegResNetTrainer:
         )
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
-        self.train_loader, self.val_loader = build_dataloaders(
-            manifest,
-            split,
-            fold=config.fold,
-            batch_size=config.batch_size,
-            samples_per_case=config.samples_per_case,
-            num_workers=config.num_workers,
-            limit=config.limit_cases,
-            root=data_root,
-            val_patches=True,
-        )
+        if config.prepared_root:
+            self.train_loader, self.val_loader = build_prepared_dataloaders(
+                split,
+                config.prepared_root,
+                fold=config.fold,
+                batch_size=config.batch_size,
+                samples_per_case=config.samples_per_case,
+                num_workers=config.num_workers,
+                limit=config.limit_cases,
+            )
+        else:
+            self.train_loader, self.val_loader = build_dataloaders(
+                manifest,
+                split,
+                fold=config.fold,
+                batch_size=config.batch_size,
+                samples_per_case=config.samples_per_case,
+                num_workers=config.num_workers,
+                limit=config.limit_cases,
+                root=data_root,
+                val_patches=True,
+            )
 
         self.start_epoch = 0
         self.global_step = 0
@@ -138,12 +155,21 @@ class SegResNetTrainer:
 
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _content_hash(payload: Any) -> str:
+        """Content-addressed identity, independent of file path or machine."""
+        encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
     def provenance(self) -> dict[str, Any]:
         """Config, data identity, and code identity for this run."""
         return {
             "config": asdict(self.config),
+            "data_source": "prepared_cache" if self.config.prepared_root else "raw_nifti",
             "manifest_version": self.manifest["meta"]["version"],
+            "manifest_sha256": self._content_hash(self.manifest),
             "split_version": self.split["meta"]["version"],
+            "split_sha256": self._content_hash(self.split),
             "split_seed": self.split["meta"]["seed"],
             "fold": self.config.fold,
             "num_classes": NUM_CLASSES,

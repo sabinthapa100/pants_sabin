@@ -1,16 +1,13 @@
-"""Make the repository root importable so `pytest` works from any invocation.
+"""Register the one custom pytest marker this suite uses.
 
-Without this, `pytest tests/` fails with ModuleNotFoundError: no module named
-'src', because pytest puts the test directory on sys.path rather than the
-project root. Only `python -m pytest` would work otherwise.
+The former `sys.path` manipulation is gone: run the suite as
+`python -m pytest` from the project root, which puts the root on `sys.path`
+without any help from us.
+
+What remains is not a path hack. Without this registration pytest emits a
+`PytestUnknownMarkWarning` on every run, which teaches readers to ignore
+warnings, and the marker's meaning would be documented nowhere.
 """
-
-import sys
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def pytest_configure(config):

@@ -340,13 +340,23 @@ def _validate_created_dataset(
     }
 
 
-def prepare_nnunet_smoke_dataset(
-    dataset_id: int = 501,
-    name: str = "PanTSSmoke",
-    max_cases: int = 40,
-    overwrite: bool = False,
+def _build_dataset(
+    dataset_id: int,
+    name: str,
+    cases: list[CaseLabelSummary],
+    overwrite: bool,
 ) -> dict[str, Any]:
-    """Create and fully validate a symlink-based PanTS-tr smoke dataset."""
+    """Create and validate one symlink-based nnU-Net raw dataset, atomically.
+
+    Shared by the smoke dataset and the 9,000-case production dataset: the
+    only difference between them is which cases arrive here, so the layout,
+    the dataset.json and the safety checks cannot diverge.
+
+    Symlinks, never copies. nnU-Net reads each source once during fingerprint
+    extraction and once during preprocessing; duplicating 342 GB to satisfy a
+    directory layout would be pure waste, and it keeps the raw PanTS tree the
+    single source of truth.
+    """
 
     folder_name = _dataset_folder_name(dataset_id, name)
     dataset_dir = NNUNET_RAW / folder_name
@@ -396,9 +406,6 @@ def prepare_nnunet_smoke_dataset(
                     "Refusing to replace a non-directory temporary path: "
                     f"{temporary_path}"
                 )
-
-    cases, selection_report = select_smoke_cases(max_cases=max_cases)
-    _validate_selected_sources(cases)
 
     NNUNET_RAW.mkdir(parents=True, exist_ok=True)
     NNUNET_PREPROCESSED.mkdir(parents=True, exist_ok=True)
@@ -451,7 +458,6 @@ def prepare_nnunet_smoke_dataset(
         "dataset_name": name,
         "dataset_dir": str(dataset_dir.resolve()),
         "cases": cases,
-        "selection": selection_report,
         "validation": validation_report,
         "nnunet_paths": {
             "nnUNet_raw": str(NNUNET_RAW.resolve()),
@@ -459,3 +465,49 @@ def prepare_nnunet_smoke_dataset(
             "nnUNet_results": str(NNUNET_RESULTS.resolve()),
         },
     }
+
+
+def prepare_nnunet_smoke_dataset(
+    dataset_id: int = 501,
+    name: str = "PanTSSmoke",
+    max_cases: int = 40,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Create a small coverage-driven smoke dataset, reading every candidate label."""
+
+    cases, selection_report = select_smoke_cases(max_cases=max_cases)
+    _validate_selected_sources(cases)
+    report = _build_dataset(dataset_id, name, cases, overwrite)
+    report["selection"] = selection_report
+    return report
+
+
+def prepare_nnunet_production_dataset(
+    manifest: dict[str, Any],
+    dataset_id: int = 500,
+    name: str = "PanTS",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Create the full PanTS-tr dataset from the authoritative manifest.
+
+    Case selection is not repeated here and per-case label reading is not
+    repeated either: ``build_manifest`` already refused to emit a manifest
+    unless every case had both files, matching CT/label geometry, label values
+    inside 0...28, and an identifier inside the PanTS-tr range. Re-reading 342
+    GB to re-derive facts the manifest already guarantees would cost an hour
+    and could only ever agree.
+    """
+
+    cases = [
+        CaseLabelSummary(
+            case_id=entry["case_id"],
+            label_ids=frozenset({BACKGROUND, PANCREATIC_LESION})
+            if entry["lesion_present"]
+            else frozenset({BACKGROUND}),
+        )
+        for entry in manifest["cases"]
+    ]
+    report = _build_dataset(dataset_id, name, cases, overwrite)
+    report["source"] = "manifest"
+    report["lesion_positive"] = sum(1 for case in cases if case.lesion_positive)
+    return report

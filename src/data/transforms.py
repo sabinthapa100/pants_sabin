@@ -12,8 +12,19 @@ Design decisions and their evidence are documented in
   fixed-size patch cover wildly different anatomy per case.
 * **96^3 patches**, which at 1.5 mm cover 144 mm per side - enough to contain
   the whole pancreas and the peripancreatic vessels in a single window.
-* **[-100, 200] HU -> [0, 1]**, the exact window the SuPreM checkpoint was
+* **[-175, 250] HU -> [0, 1]**, the exact window the SuPreM checkpoint was
   pretrained with, so transfer is tested on its own terms.
+
+The chain is deliberately split into three named stages:
+
+``deterministic_transforms``
+    a pure function of the case. Identical for training, validation and
+    inference, and therefore the part that can be computed once and cached
+    (see ``prepared.py``).
+
+``sampling_transforms`` / ``augmentation_transforms``
+    stochastic. These must run at training time on every epoch, or the model
+    would see one frozen realization of the data.
 """
 
 from __future__ import annotations
@@ -97,7 +108,7 @@ class AlignLabelGeometryd(MapTransform):
     """
     Force the label to share the CT's world-coordinate affine.
 
-    In 78 of the 9,000 PanTS-tr cases the ``combined_labels`` affine is
+    In 80 of the 9,000 PanTS-tr cases the ``combined_labels`` affine is
     degenerate: the translation is zeroed and the direction matrix is reset to
     LPS, even though the label array is stored index-aligned with the CT. Shape
     and voxel spacing always agree, so the two arrays correspond one-to-one.
@@ -107,12 +118,16 @@ class AlignLabelGeometryd(MapTransform):
     cases - training the model on left/right-flipped anatomy with no error
     raised anywhere.
 
-    Which array is authoritative was determined empirically rather than
-    assumed: across all 78 affected cases, index-aligned labels place liver at
-    15-143 HU and lung near -761 HU, while the mirrored interpretation puts
-    liver at a median of -113 HU and femur in air.
+    Which array is authoritative was established against the *standalone*
+    per-structure masks in ``LabelTr/<case>/segmentations/``, not by intensity
+    plausibility. Across all 80 affected cases, 1,852 of 1,852 class
+    comparisons found the combined-label voxels fully contained in the
+    corresponding standalone mask, and every one of the 80 cases has at least
+    one standalone mask whose affine *equals* the CT affine. The combined
+    arrays are therefore index-aligned with the CT and only the NIfTI affine
+    metadata is defective.
 
-    The transform is a no-op for the 8,922 cases whose affines already agree,
+    The transform is a no-op for the 8,920 cases whose affines already agree,
     so it is applied unconditionally rather than from a per-case flag.
     """
 
@@ -222,32 +237,28 @@ def deterministic_transforms(
     ]
 
 
-def train_transforms(
+def sampling_transforms(
     patch_size: Sequence[int] = PATCH_SIZE,
-    target_spacing: Sequence[float] = TARGET_SPACING,
     samples_per_case: int = 2,
-    augment: bool = True,
-) -> Compose:
+) -> list:
     """
-    Training pipeline: deterministic core, tumor-aware crop, intensity noise.
+    The stochastic tumor-aware cropping stage.
 
-    Output per sample: ``image`` ``[1, 96, 96, 96]`` float, ``label``
-    ``[1, 96, 96, 96]`` integer-valued. With ``samples_per_case > 1`` the
-    transform emits a list of that many patches per case.
+    Input: whole ``image``/``label`` volumes already in the canonical training
+    frame - RAS, 1.5 mm, image scaled to [0, 1]. It does not matter whether
+    they arrived from raw NIfTI or from the prepared cache; this stage never
+    reorients, resamples or renormalizes.
 
-    Only intensity augmentation is applied. Spatial flips and 90-degree
-    rotations are deliberately omitted - see ``PREPROCESSING``.
+    Output: ``samples_per_case`` patches of ``[1, 96, 96, 96]``.
 
-    ``augment=False`` drops the stochastic intensity transforms while keeping
-    the identical deterministic core and the identical tumor-aware crop. It is
-    used for patch-level validation loss and for the tiny-overfit test, where
-    augmentation would otherwise prevent the network from memorizing a sample.
+    ``SpatialPadd`` runs first because 6% of PanTS-tr volumes are thinner than
+    96 voxels on some axis after resampling and could not otherwise host a
+    patch.
     """
 
     patch = tuple(int(value) for value in patch_size)
 
-    sampling = [
-        *deterministic_transforms(target_spacing),
+    return [
         DeriveSamplingMapd(),
         SpatialPadd(keys=["image", "label", SAMPLING_KEY], spatial_size=patch),
         RandCropByLabelClassesd(
@@ -262,7 +273,17 @@ def train_transforms(
         DeleteItemsd(keys=[SAMPLING_KEY]),
     ]
 
-    intensity_augmentation = [
+
+def augmentation_transforms() -> list:
+    """
+    Intensity-only augmentation.
+
+    Spatial flips and 90-degree rotations are deliberately omitted: PanTS has
+    laterality-paired classes, so a mirrored left kidney would still carry the
+    ``kidney_left`` label. See ``PREPROCESSING``.
+    """
+
+    return [
         RandShiftIntensityd(keys=["image"], offsets=0.10, prob=0.5),
         RandGaussianNoised(keys=["image"], prob=0.2, mean=0.0, std=0.01),
         RandGaussianSmoothd(
@@ -274,10 +295,34 @@ def train_transforms(
         ),
     ]
 
+
+def train_transforms(
+    patch_size: Sequence[int] = PATCH_SIZE,
+    target_spacing: Sequence[float] = TARGET_SPACING,
+    samples_per_case: int = 2,
+    augment: bool = True,
+) -> Compose:
+    """
+    Training pipeline from **raw NIfTI**: deterministic core, crop, augment.
+
+    Output per sample: ``image`` ``[1, 96, 96, 96]`` float, ``label``
+    ``[1, 96, 96, 96]`` integer-valued. With ``samples_per_case > 1`` the
+    transform emits a list of that many patches per case.
+
+    ``augment=False`` drops the stochastic intensity transforms while keeping
+    the identical deterministic core and the identical tumor-aware crop. It is
+    used for patch-level validation loss and for the tiny-overfit test, where
+    augmentation would otherwise prevent the network from memorizing a sample.
+
+    The cache-fed equivalent is ``prepared.prepared_train_transforms``, which
+    reuses the two stochastic stages below verbatim.
+    """
+
     return Compose(
         [
-            *sampling,
-            *(intensity_augmentation if augment else []),
+            *deterministic_transforms(target_spacing),
+            *sampling_transforms(patch_size, samples_per_case),
+            *(augmentation_transforms() if augment else []),
             EnsureTyped(keys=["image", "label"]),
         ]
     )

@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", default=str(PROJECT_ROOT / "outputs/runs"))
     parser.add_argument("--resume", type=Path, default=None, help="checkpoint to resume from")
     parser.add_argument("--data-root", type=Path, default=None, help="override PANTS_DATA_ROOT")
+    parser.add_argument(
+        "--prepared-root",
+        default=None,
+        help="train from the prepared npz cache instead of raw NIfTI (Colab path)",
+    )
     return parser.parse_args()
 
 
@@ -83,6 +88,7 @@ def main() -> int:
         amp=not args.no_amp,
         device=args.device,
         output_root=args.output_root,
+        prepared_root=args.prepared_root,
     )
 
     trainer = SegResNetTrainer(

@@ -29,17 +29,20 @@ only.
 
 ```text
 pants_sabin/
-├── configs/                 # one experiment = one tracked config (declarative records)
-├── pants_cv_v1.json         # authoritative fixed 5-fold split (tracked)
+├── pants_cv_v1.json         # authoritative fixed 5-fold split (tracked, defines the experiment)
 ├── src/
-│   ├── data/                # paths, labels, I/O, QC, manifest, transforms
+│   ├── data/                # paths, labels, I/O, QC, manifest, transforms, prepared cache
 │   ├── models/              # SegResNet + SuPreM transfer
-│   ├── training/            # resumable checkpoints
+│   ├── training/            # trainer + resumable checkpoints
 │   └── evaluation/          # metrics and inference primitives
 ├── scripts/                 # thin command-line entry points
 ├── notebooks/               # Colab orchestration only
 └── tests/
 ```
+
+Generated data never lives in the repository. The prepared training cache, the
+case manifest and every nnU-Net artifact are written to gitignored paths and
+are rebuildable from the raw NIfTIs plus this code.
 
 ## Setup
 
@@ -371,31 +374,81 @@ false-positive rate. Connected-component filtering and size thresholds are
 deliberately absent, since inventing them would amount to inventing the
 unpublished matching protocol.
 
+## Prepared training cache
+
+The expensive deterministic preprocessing runs **once, locally**, and the result
+is a compact portable dataset that both SegResNet arms share byte-for-byte.
+
+```bash
+python scripts/prepare_data.py --prepare-segresnet \
+  --output /path/outside/the/repo/PanTS_prepared/segresnet --workers 4
+```
+
+Each case becomes one `np.savez_compressed` archive holding exactly two plain
+arrays — `image` float16 `[D,H,W]` in [0,1] and `label` uint8 `[D,H,W]` with
+values 0–28. No pickles, no objects, no affines: the cache is already in the
+training coordinate system, and inference recovers source geometry from the
+original NIfTI instead.
+
+```text
+<prepared-root>/
+├── cases/PanTS_XXXXXXXX.npz
+├── manifest.json
+└── preprocessing.json      # orientation, spacing, window, dtypes, commit, hashes
+```
+
+Writes are atomic and power-loss safe: temporary file → `fsync` → reopen with
+`allow_pickle=False` → validate both arrays → `os.replace` → `fsync` the
+directory. Re-running skips completed cases, so an interrupted 9,000-case job
+resumes instead of restarting.
+
+`tests/test_prepared.py` asserts that the cache path and the raw-NIfTI path
+produce the same patches from the same seed, so the two can never drift apart.
+
+### Transport to Google Drive
+
+`npz` is already compressed, so the shards are **uncompressed** `tar` — tar
+aggregates files, it does not compress them. Bundling avoids thousands of tiny
+Drive objects.
+
+```bash
+cd <prepared-root>
+ls cases/*.npz | sort > /tmp/all && split -d -l <N> /tmp/all /tmp/shard_
+for part in /tmp/shard_*; do
+  tar --create --file "shards/segresnet_shard_${part##*_}.tar" \
+      --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner --files-from "$part"
+done
+sha256sum shards/*.tar manifest.json preprocessing.json > SHA256SUMS
+sha256sum -c SHA256SUMS
+
+rclone copy . gdrive:PanTS_prepared/segresnet --exclude "cases/**" --dry-run
+rclone copy . gdrive:PanTS_prepared/segresnet --exclude "cases/**" --transfers 8 --progress
+rclone check . gdrive:PanTS_prepared/segresnet --exclude "cases/**"
+```
+
+The fixed metadata makes shards byte-reproducible. Re-running `rclone copy`
+transfers only what is missing, which is how an interrupted upload resumes.
+
 ## Colab
 
-Google Drive is durable storage; `/content` is fast scratch. The execution
-model for a session:
+`notebooks/PanTS_SegResNet_Colab.ipynb` is the cloud-training interface. It
+orchestrates only — every model, transform and checkpoint comes from `src/` at
+a pinned commit.
 
-1. mount Drive;
-2. clone a pinned Git commit;
-3. `export PANTS_DATA_ROOT=...` (Drive, or the staged copy);
-4. stage **only the selected smoke/pilot cases** into `/content`;
-5. train from `/content`;
-6. save checkpoints and results back to Drive.
+Drive is **persistent transport**. `/content` is the **ephemeral fast disk** that
+training actually reads; a FUSE-mounted Drive cannot sustain the random reads a
+dataloader issues. Per shard: copy → verify SHA256 → extract → delete the
+archive → next, so peak disk is *cache + one shard* rather than *cache + all
+archives*.
 
-Checkpoints must land on Drive, not only `/content`, or a disconnect loses the
-run. Point `--output-root` at a Drive path, or copy `latest.pt`/`best.pt` across
-after each epoch.
+A disconnect destroys `/content`: the repo, the staged cache and any checkpoint
+not yet copied to Drive. Recovery is to re-run the staging sections at the same
+pinned commit and resume from `latest.pt`, **using the original `--epochs`** —
+the cosine schedule stored in the checkpoint was built for that horizon.
 
-Full 9,000-case training is **not** realistic on Colab. `ImageTr` alone is
-296 GB against roughly 100–225 GB of `/content`, and training directly off
-mounted Drive is I/O-bound. Production runs need NERSC or a persistent VM with
-attached block storage. Measured sizes: `ImageTr` 296 GB, `LabelTr` 46 GB
-(of which `combined_labels` is only 7.8 GB), `ImageTe` 27 GB, `LabelTe` 4 GB.
-
-> The existing notebook `notebooks/PanTS_nnUNet_Colab.ipynb` pins the Git tag
-> `nnunet-colab-v1` (commit `c659518`) and reproduces the earlier nnU-Net-only
-> smoke experiment. It does **not** use the code described here.
+> `notebooks/PanTS_nnUNet_Colab.ipynb` pins the older tag `nnunet-colab-v1`
+> (commit `c659518`) and reproduces the earlier nnU-Net-only smoke experiment.
+> It does **not** use the code described here.
 
 ## Commands
 
@@ -409,18 +462,27 @@ python scripts/inspect_data.py --case PanTS_00000003
 # manifest + split
 python scripts/prepare_data.py --manifest --split --workers 8
 
-# fast suite (one-batch, resume and geometry tests need PANTS_DATA_ROOT)
-pytest -q
+# prepared training cache: 100-case representative pilot, then all 9,000
+python scripts/prepare_data.py --prepare-segresnet --pilot 100 --output <prepared-root> --workers 4
+python scripts/prepare_data.py --prepare-segresnet --output <prepared-root> --workers 4
+
+# nnU-Net production dataset (symlinks) + the same split in native format
+python scripts/prepare_nnunet.py --production
+
+# whole suite; `python -m pytest` puts the project root on sys.path
+python -m pytest tests/ -q
 
 # tiny-overfit pipeline check, both arms (~3 min)
-pytest tests/test_overfit.py -q -s -m slow
+python -m pytest tests/test_overfit.py -q -s -m slow
 
-# smoke training, both arms
-python scripts/train_segresnet.py --initialization random --split <smoke_split.json> --epochs 3
-python scripts/train_segresnet.py --initialization suprem --split <smoke_split.json> --epochs 3
+# training from the cache, both arms — identical but for --initialization
+python scripts/train_segresnet.py --initialization random \
+  --prepared-root <prepared-root> --manifest <prepared-root>/manifest.json --fold 0
+python scripts/train_segresnet.py --initialization suprem --pretrained-checkpoint $SUPREM_CHECKPOINT \
+  --prepared-root <prepared-root> --manifest <prepared-root>/manifest.json --fold 0
 
 # resume after an interruption (use the SAME --epochs as the original run)
-python scripts/train_segresnet.py --initialization random --epochs 3 \
+python scripts/train_segresnet.py --initialization random --epochs <original> \
   --resume outputs/runs/segresnet_random/latest.pt
 ```
 
@@ -428,13 +490,27 @@ python scripts/train_segresnet.py --initialization random --epochs 3 \
 
 Implemented: portable data root; authoritative 9,000-case manifest with
 validation; fixed deterministic split shared by all three experiments; shared
-preprocessing and verified tumor-aware sampling; strict SuPreM transfer; one
-minimal trainer running both arms; proven checkpoint/resume; memory-safe
+preprocessing and verified tumor-aware sampling; the portable prepared cache and
+its Drive transport; strict SuPreM transfer; one minimal trainer running both
+arms from either the cache or raw NIfTI; proven checkpoint/resume; memory-safe
 whole-volume inference with geometry restoration; internal evaluation metrics;
 unit and integration tests.
 
-Not yet implemented: production-scale training, full nnU-Net preprocessing, any
-PanTS-te evaluation, and the submission inference package.
+Not yet implemented: production-scale training, any PanTS-te evaluation, and the
+submission inference package.
+
+### nnU-Net: paused, not abandoned
+
+The nnU-Net production data definition, the full 9,000-case fingerprint and the
+experiment planning are **complete**. Production preprocessing is **paused** and
+will resume after the SegResNet/SuPreM study.
+
+Preserved and unchanged: `src/data/nnunet.py`, `scripts/prepare_nnunet.py`, the
+`Dataset500_PanTS` symlink dataset, `dataset_fingerprint.json`,
+`nnUNetPlans.json`, and `splits_final.json` derived from `pants_cv_v1.json`.
+The production `3d_fullres` plan is spacing `[1.25, 0.793, 0.793]`, patch
+`[64, 160, 192]`, batch 2, `CTNormalization`, `NibabelIOWithReorient`. That plan
+is not to be modified to fit any hardware budget.
 
 ### Engineering smoke run, not a result
 
