@@ -1,3 +1,18 @@
+# PyTorch is intentionally NOT pinned here.
+#
+# The correct wheel depends on your GPU, CUDA runtime, and platform, so install
+# it first following https://pytorch.org/get-started/locally/ and only then run
+# `pip install -r requirements.txt`.
+#
+# Verified working combination for this repository:
+#   Python      3.11.15
+#   PyTorch     2.13.0+cu126
+#   MONAI       1.5.1
+#   nnU-Net v2  2.8.1
+#
+# nnunetv2 and monai both declare a torch dependency, so an existing correct
+# torch install is respected rather than replaced.
+
 numpy
 scipy
 pandas
@@ -8,5 +23,11 @@ openpyxl
 matplotlib
 tqdm
 PyYAML
+
+# 3D SegResNet, transforms, and sliding-window inference.
+monai==1.5.1
+
+# Independent nnU-Net v2 baseline.
 nnunetv2==2.8.1
+
 pytest==9.1.1

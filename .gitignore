@@ -16,6 +16,11 @@ nnunet/
 # All generated figures, predictions, checkpoints, and logs
 outputs/
 
+# Derived case manifest: exactly reproducible from the raw data via
+# `scripts/prepare_data.py --manifest`. The fixed CV split it feeds
+# (pants_cv_v1.json) IS tracked, because that one defines the experiment.
+pants_tr_manifest.json
+
 # ============================================================
 # Medical imaging / ML artifacts
 # ============================================================

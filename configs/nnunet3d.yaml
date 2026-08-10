@@ -1,3 +1,17 @@
+# Independent baseline: nnU-Net v2 3D full-resolution.
+#
+# nnU-Net is self-configuring. It derives its own target spacing, patch size,
+# batch size, and normalization from a dataset fingerprint, and it runs its own
+# training and inference. It therefore does NOT share src/data/transforms.py
+# with the SegResNet arms; forcing it to would disable the very mechanism that
+# makes it a strong baseline.
+#
+# What it DOES share is the case partition: `splits/pants_cv_v1.json` is
+# emitted into nnU-Net's native splits_final.json so all three experiments
+# validate on exactly the same cases.
+#
+# NOTE: declarative provenance record; no code reads this file.
+
 experiment:
   name: nnunet3d
   seed: 317
@@ -5,11 +19,24 @@ experiment:
 model:
   name: nnunet_v2
   configuration: 3d_fullres
-  folds: [0, 1, 2, 3, 4]
+  folds: [0]                    # folds 1-4 available if compute permits
 
 training:
   trainer: nnUNetTrainer
 
-paths:
-  data_root: ${PANTS_DATA_ROOT}
-  output_root: ${PANTS_OUTPUT_ROOT}
+data:
+  root: null                    # from $PANTS_DATA_ROOT
+  split: splits/pants_cv_v1.json
+  # Copy into $nnUNet_preprocessed/<Dataset>/splits_final.json via
+  #   python scripts/prepare_data.py --emit-nnunet-splits <path>
+  nnunet_splits_target: splits_final.json
+
+# Recorded for reference only: nnU-Net's own fingerprint on the 40-case
+# Dataset501 smoke set chose an ANISOTROPIC target spacing, which is what
+# motivated checking the real PanTS-tr spacing distribution rather than
+# assuming isotropy.
+observed_fingerprint_dataset501:
+  target_spacing_zyx: [1.75, 0.78125, 0.78125]
+  patch_size: [48, 160, 224]
+  batch_size: 2
+  normalization: CTNormalization
