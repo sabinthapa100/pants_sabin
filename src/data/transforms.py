@@ -202,9 +202,10 @@ class DeriveSamplingMapd(MapTransform):
 
 def deterministic_transforms(
     target_spacing: Sequence[float] = TARGET_SPACING,
+    with_label: bool = True,
 ) -> list:
     """
-    The preprocessing shared byte-for-byte by training and validation.
+    The preprocessing shared byte-for-byte by training, validation and inference.
 
     ``Orientationd`` reorients: it permutes and flips voxel axes so they align
     with Right/Anterior/Superior. This is pure index bookkeeping and loses no
@@ -214,17 +215,30 @@ def deterministic_transforms(
     interpolate. Labels use nearest-neighbour because linear interpolation
     would invent fractional class identifiers such as 17.4, which correspond to
     no anatomical structure.
+
+    ``with_label=False`` yields the IMAGE-ONLY chain used to segment an unseen
+    CT. The intensity rules are the same objects, not a copy: the only
+    difference is that no label key participates, so inference never needs an
+    annotation, a case identifier, or a fabricated placeholder label.
     """
 
-    return [
-        LoadImaged(keys=["image", "label"], ensure_channel_first=True, image_only=True),
-        EnsureTyped(keys=["image", "label"], track_meta=True),
-        AlignLabelGeometryd(),
-        Orientationd(keys=["image", "label"], axcodes=ORIENTATION),
+    keys = ["image", "label"] if with_label else ["image"]
+
+    chain: list = [
+        LoadImaged(keys=keys, ensure_channel_first=True, image_only=True),
+        EnsureTyped(keys=keys, track_meta=True),
+    ]
+    if with_label:
+        # Meaningful only when a label exists: it repairs the label's affine
+        # against the CT's before either is reoriented.
+        chain.append(AlignLabelGeometryd())
+
+    chain += [
+        Orientationd(keys=keys, axcodes=ORIENTATION),
         Spacingd(
-            keys=["image", "label"],
+            keys=keys,
             pixdim=tuple(float(value) for value in target_spacing),
-            mode=("bilinear", "nearest"),
+            mode=("bilinear", "nearest") if with_label else ("bilinear",),
         ),
         ScaleIntensityRanged(
             keys=["image"],
@@ -235,6 +249,23 @@ def deterministic_transforms(
             clip=True,
         ),
     ]
+    return chain
+
+
+def inference_transforms(target_spacing: Sequence[float] = TARGET_SPACING) -> Compose:
+    """Image-only deterministic preprocessing for an unseen CT.
+
+    Input: ``{"image": "/any/path/scan.nii.gz"}``. No label, no manifest, no
+    split, no prepared cache, no case identifier. Output: ``image`` as a
+    ``[1, D, H, W]`` MetaTensor in [0, 1] carrying the applied-operation stack
+    that ``Invertd`` later replays to return predictions to the source grid.
+    """
+    return Compose(
+        [
+            *deterministic_transforms(target_spacing, with_label=False),
+            EnsureTyped(keys=["image"]),
+        ]
+    )
 
 
 def sampling_transforms(

@@ -57,6 +57,23 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="train from the prepared npz cache instead of raw NIfTI (Colab path)",
     )
+    parser.add_argument(
+        "--persistent-output-root",
+        default=None,
+        help="durable copy of latest.pt/best.pt/JSON, e.g. a mounted Drive directory",
+    )
+    parser.add_argument(
+        "--validate-every-epochs",
+        type=int,
+        default=5,
+        help="cadence of deterministic whole-volume validation, which selects best.pt",
+    )
+    parser.add_argument(
+        "--monitoring-negatives",
+        type=int,
+        default=100,
+        help="lesion-negative cases in the fixed model-selection subset",
+    )
     return parser.parse_args()
 
 
@@ -89,6 +106,9 @@ def main() -> int:
         device=args.device,
         output_root=args.output_root,
         prepared_root=args.prepared_root,
+        persistent_output_root=args.persistent_output_root,
+        validate_every_epochs=args.validate_every_epochs,
+        monitoring_negatives=args.monitoring_negatives,
     )
 
     trainer = SegResNetTrainer(

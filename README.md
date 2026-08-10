@@ -475,15 +475,21 @@ python -m pytest tests/ -q
 # tiny-overfit pipeline check, both arms (~3 min)
 python -m pytest tests/test_overfit.py -q -s -m slow
 
-# training from the cache, both arms — identical but for --initialization
-python scripts/train_segresnet.py --initialization random \
-  --prepared-root <prepared-root> --manifest <prepared-root>/manifest.json --fold 0
-python scripts/train_segresnet.py --initialization suprem --pretrained-checkpoint $SUPREM_CHECKPOINT \
+# SMOKE training only — a few epochs on a truncated cohort, for plumbing checks.
+# Production training runs from notebooks/PanTS_SegResNet_Colab.ipynb, which
+# requires an explicitly agreed training horizon and never caps steps per epoch.
+python scripts/train_segresnet.py --initialization random --epochs 2 \
+  --limit-cases 40 --max-steps-per-epoch 20 \
   --prepared-root <prepared-root> --manifest <prepared-root>/manifest.json --fold 0
 
 # resume after an interruption (use the SAME --epochs as the original run)
 python scripts/train_segresnet.py --initialization random --epochs <original> \
   --resume outputs/runs/segresnet_random/latest.pt
+
+# segment ONE unseen CT: needs only a trained checkpoint and a NIfTI
+python scripts/infer_segresnet.py \
+  --input /any/path/scan.nii.gz --output predictions/ \
+  --checkpoint outputs/runs/segresnet_random/best.pt --lesion-probability
 ```
 
 ## Status
@@ -531,8 +537,35 @@ short of convergence for the rarest class, the cohort is tiny, and no
 hyperparameter was tuned. They must not be read as a comparison between
 initializations.
 
-The `configs/*.yaml` files are declarative provenance records. No code reads
-them yet; the trainer arrives in the next milestone.
+Experiment parameters live in CLI arguments, `preprocessing.json` and each
+checkpoint's provenance block — there is no config file format to keep in sync.
+
+## Inference on an unseen CT
+
+`scripts/infer_segresnet.py` needs a trained checkpoint and a CT. It reads no
+label, no manifest, no split, no prepared cache and no SuPreM checkpoint, and it
+does not care which initialization the model started from — after training those
+are simply learned PanTS weights.
+
+```text
+raw CT (int16 HU, native grid)
+  -> RAS -> 1.5 mm -> [-175,250] HU -> [0,1]      image-only, same rules as training
+  -> sliding-window inference, CPU stitching       0.45 GB VRAM
+  -> argmax -> labels 0..28, softmax -> class-28 probability
+  -> inverse transform back to the SOURCE grid     nearest for labels, linear for probability
+  -> combined_labels.nii.gz (uint8), pancreatic_lesion_probability.nii.gz (float32)
+```
+
+Outputs carry the source affine, shape and orientation, so an external evaluator
+can compute its own metrics against its own reference.
+
+## Model selection
+
+`latest.pt` is the most recently completed epoch, for resume. `best.pt` is the
+checkpoint with the best **deterministic** whole-volume score: mean class-28
+Dice over the lesion-positive cases of a fixed monitoring subset inside fold-0
+validation. Per-epoch patch validation is a cheap diagnostic and never selects a
+checkpoint — its crops are random, so it moves even when the model does not.
 
 ## Data rule
 

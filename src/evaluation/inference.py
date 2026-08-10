@@ -137,15 +137,19 @@ def predict_case_in_source_geometry(
 
     Large intermediates are released before returning so that looping over
     patients does not accumulate memory.
+
+    Nothing but the CT is read. The default transform is the image-only chain,
+    so this function is exactly what runs on an unseen scan from an external
+    cohort: no label, no manifest, no split, no prepared cache, no case ID.
     """
     from monai.data import MetaTensor
     from monai.transforms import Invertd
 
-    from ..data.transforms import val_transforms
+    from ..data.transforms import inference_transforms
 
-    transform = transform or val_transforms()
+    transform = transform or inference_transforms()
 
-    prepared = transform({"image": image_path, "label": image_path})
+    prepared = transform({"image": image_path})
     reference = prepared["image"]
 
     logits = predict_logits(

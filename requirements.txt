@@ -13,16 +13,16 @@
 # nnunetv2 and monai both declare a torch dependency, so an existing correct
 # torch install is respected rather than replaced.
 
+# Imported directly by this repository.
 numpy
-scipy
-pandas
-scikit-image
 nibabel
-SimpleITK
-openpyxl
 matplotlib
-tqdm
-PyYAML
+pandas           # manifest.py only, to read the optional metadata.xlsx
+openpyxl         # the .xlsx engine pandas needs; not imported by name
+
+# scipy, scikit-image, SimpleITK and tqdm were listed here but are never
+# imported by this project; nnunetv2 declares them and pip installs them.
+# PyYAML was left over from the deleted configs/ directory.
 
 # 3D SegResNet, transforms, and sliding-window inference.
 monai==1.5.1

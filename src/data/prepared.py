@@ -461,6 +461,35 @@ def build_prepared_dataloaders(
 # --------------------------------------------------------------------------- #
 
 
+def select_monitoring_cases(
+    manifest: dict[str, Any],
+    split: dict[str, Any],
+    fold: int = 0,
+    negatives: int = 100,
+) -> list[str]:
+    """The fixed whole-volume subset used to select ``best.pt``.
+
+    This is NOT a new split. It is a deterministic monitoring window *inside*
+    fold-``fold`` validation: every lesion-positive validation case, plus an
+    evenly-spaced sample of lesion-negative ones so false positives are visible.
+    Sorting plus a fixed stride means no RNG is involved and the same cases are
+    chosen on every machine, which is what makes the selection metric
+    comparable between the two initialization arms.
+    """
+    validation = set(split["folds"][fold]["val"])
+    lesion = {case["case_id"]: case["lesion_present"] for case in manifest["cases"]}
+
+    positive = sorted(case for case in validation if lesion.get(case))
+    negative = sorted(case for case in validation if not lesion.get(case))
+    return sorted(positive + _stride_sample(negative, int(negatives)))
+
+
+def cases_fingerprint(case_ids: Sequence[str]) -> str:
+    """Short content hash identifying exactly which cases a metric was computed on."""
+    joined = "\n".join(sorted(case_ids)).encode("utf-8")
+    return hashlib.sha256(joined).hexdigest()[:16]
+
+
 @dataclass(frozen=True)
 class PilotSelection:
     case_ids: list[str]
