@@ -57,6 +57,53 @@ def per_class_dice(
     return {label: dice_score(pred, target, label, empty_score) for label in labels}
 
 
+def all_class_dice(
+    pred: np.ndarray,
+    target: np.ndarray,
+    labels: Sequence[int],
+    empty_score: float = math.nan,
+) -> dict[int, float]:
+    """
+    Same result as :func:`per_class_dice`, computed from three label histograms.
+
+    ``per_class_dice`` walks the full volume twice per label. Over 28 classes
+    and ~8 M voxels that is 56 passes, roughly 0.45 s per case, which across
+    1,801 validation cases is a quarter of an hour spent re-reading the same
+    arrays. Counting once with ``bincount`` costs three passes instead.
+
+    The identity is exact, not approximate: for label ``c``, the voxels where
+    prediction and target agree *and* equal ``c`` are precisely the
+    intersection, and the two histograms give the mask sizes. The empty/empty
+    convention is inherited unchanged, so a class absent from both volumes is
+    ``empty_score`` rather than a free 1.0.
+    """
+
+    if pred.shape != target.shape:
+        raise ValueError(f"Shape mismatch: pred={pred.shape}, target={target.shape}")
+
+    flat_pred = np.asarray(pred).reshape(-1).astype(np.int64, copy=False)
+    flat_target = np.asarray(target).reshape(-1).astype(np.int64, copy=False)
+    if flat_pred.size and (flat_pred.min() < 0 or flat_target.min() < 0):
+        raise ValueError("negative label values cannot be histogrammed")
+
+    size = 1 + max(
+        int(flat_pred.max(initial=0)), int(flat_target.max(initial=0)), int(max(labels))
+    )
+    agreement = flat_pred == flat_target
+    intersection = np.bincount(flat_pred[agreement], minlength=size)
+    pred_counts = np.bincount(flat_pred, minlength=size)
+    target_counts = np.bincount(flat_target, minlength=size)
+
+    scores: dict[int, float] = {}
+    for label in labels:
+        denominator = int(pred_counts[label]) + int(target_counts[label])
+        scores[label] = (
+            empty_score if denominator == 0
+            else 2.0 * int(intersection[label]) / denominator
+        )
+    return scores
+
+
 def lesion_case_metrics(
     pred: np.ndarray,
     target: np.ndarray,

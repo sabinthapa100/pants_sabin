@@ -16,6 +16,19 @@ nnunet/
 # All generated figures, predictions, checkpoints, and logs
 outputs/
 
+# Evaluation results and figures. DERIVED: regenerate with
+# `scripts/evaluate_segresnet.py` and `scripts/analyze_segresnet.py` from a
+# checkpoint plus the tracked split. Committing a results CSV would let a stale
+# table outlive the checkpoint that produced it.
+#
+# Leading slashes matter: a bare `evaluation/` would also match the SOURCE
+# directory `src/evaluation/`, silently hiding any new module added there.
+# These patterns are anchored to the repository root.
+/evaluation/
+/figures/
+evaluation_cases.csv
+evaluation_summary.json
+
 # Derived case manifest: exactly reproducible from the raw data via
 # `scripts/prepare_data.py --manifest`. The fixed CV split it feeds
 # (pants_cv_v1.json) IS tracked, because that one defines the experiment.

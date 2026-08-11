@@ -315,9 +315,53 @@ Loss is `DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)`
 with equal Dice and cross-entropy weight. Background is excluded from the Dice
 term because it occupies most of every patch and would otherwise dominate the
 overlap signal; cross-entropy still sees it, so background remains supervised.
-Optimizer is AdamW (lr 1e-4, weight decay 1e-5) with cosine annealing and
-gradient accumulation of 4. AMP is enabled automatically on CUDA and disabled
-on CPU.
+Optimizer is AdamW (lr 1e-4, weight decay 1e-5) with cosine annealing over the
+run's full epoch horizon. AMP is enabled automatically on CUDA and disabled on
+CPU. `--accumulation` defaults to 4 for small smoke runs; the **production runs
+use 1**, because 2 cases × 2 samples already gives 4 patches per forward and
+SegResNet normalizes with GroupNorm, whose statistics are per-sample rather than
+per-batch.
+
+### Reported production configuration
+
+The configuration below is what the reported SegResNet runs use. It is frozen at
+tag `segresnet-production-v1` (commit `afdb75f3`) and identical for both arms.
+
+| | |
+| --- | --- |
+| Training data | PanTS-tr, 9,000 cases |
+| Split | `pants_cv_v1.json`, fold 0 — 7,199 train / 1,801 validation |
+| Model | MONAI 3D SegResNet, `blocks_down=[1,2,2,4]`, `blocks_up=[1,1,1]`, `init_filters=16`, 1 input channel, **29 output classes** |
+| Initialization | `suprem` (81 transferred tensors) vs `random` — **the only intended difference** |
+| Preprocessing | RAS, 1.5 mm isotropic, `[-175,250] HU → [0,1]`, 96³ patches, tumor-aware sampling, no spatial flips |
+| Epochs | **60** |
+| Batch | 2 cases × 2 patches = 4 patches per forward |
+| Accumulation | 1 → 3,600 optimizer updates per epoch |
+| Optimizer | AdamW, lr 1e-4, weight decay 1e-5, cosine annealing (`T_max` = 60) |
+| Loss | DiceCE |
+| Precision | AMP with `GradScaler` |
+| Seed | 317, applied before the model is constructed |
+| Workers | 4 (execution parameter; must match across arms because it seeds the crop/augmentation RNG) |
+| Selection | deterministic whole-volume class-28 Dice on 227 monitoring cases, every 5 epochs |
+
+One epoch = 7,199 case presentations = **14,398 patch presentations** = 3,600
+iterations. (Nominal 3,600 × 4 = 14,400; 7,199 is odd, so the final batch holds
+one case and two patches instead of four.) Sixty epochs = **216,000 optimizer
+updates**, chosen to sit in the same optimization regime as the nnU-Net baseline
+this study compares against, whose default schedule is 250,000 updates.
+
+**Training hardware used for the reported run:** Google Colab Pro, NVIDIA Tesla
+T4, PyTorch 2.11.0+cu128, MONAI 1.5.1. This records *what was used*, not a
+requirement: the checkpoint is an ordinary PyTorch state dict and inference runs
+on any CUDA GPU or on CPU. Measured runtime is recorded here only once a run has
+actually finished.
+
+Chosen on evidence, not convention — and not claimed to be globally optimal:
+1.5 mm from the lesion-preservation QC above; 96³ for a 144 mm field of view
+compatible with the SuPreM representation; `[-175,250]` because it is the SuPreM
+supervised-pretraining intensity domain; tumor-aware sampling because class 28 is
+~0.013% of voxels; no flips because laterality-paired labels would need class
+swapping; 60 epochs as a fixed compute horizon so both arms are comparable.
 
 ### Checkpoints and resume
 
@@ -373,6 +417,65 @@ lesion-positive cases only; lesion-negative cases are reported separately as a
 false-positive rate. Connected-component filtering and size thresholds are
 deliberately absent, since inventing them would amount to inventing the
 unpublished matching protocol.
+
+### Which benchmark quantities we can and cannot support
+
+| Benchmark column | Status here |
+| --- | --- |
+| **DSC** | computable and reported — plain class-28 Dice against the reference |
+| **P-Sen** | an INTERNAL case-detection rate is reported (criterion: any predicted class-28 voxel). Not the official P-Sen |
+| **Spe** | an INTERNAL case-level specificity, `1 − FP rate`, under the same criterion. Not the official Spe |
+| **T-Sen** | **not computed.** Requires a lesion connected-component rule, a matching criterion and an overlap threshold, none of which are published |
+| **AUC** | **not computed.** Requires a patient-level scoring convention that is not published |
+
+`scripts/infer_segresnet.py` writes the continuous class-28 probability map, so
+whoever holds the real protocol can compute their own operating points, T-Sen
+and AUC without re-running the model. If an official evaluator is released later
+it plugs in as an external layer over these outputs; model inference does not
+change.
+
+### Full-fold evaluation
+
+```bash
+python scripts/evaluate_segresnet.py \
+  --checkpoint <run>/best.pt \
+  --prepared-root <prepared-root> --manifest <prepared-root>/manifest.json \
+  --split pants_cv_v1.json --fold 0 \
+  --output evaluation/suprem/
+```
+
+Scores **all 1,801** fold-0 validation cases with whole-volume sliding-window
+inference — no random crops, no augmentation, no sampling — so re-running it on
+the same checkpoint returns the same numbers. Defaults (`--sw-batch-size 1`,
+`--overlap 0.5`, `--accumulate-device cpu`) match the monitoring metric that
+selected `best.pt`, which is what makes the two comparable; both arms must use
+whatever settings are chosen, and they are recorded in the summary.
+
+Writes `evaluation_cases.csv` (one row per case: lesion voxels and physical
+volume for target and prediction, class-28 Dice, detected, false positive,
+inference seconds, and Dice for every class 1–28) and `evaluation_summary.json`
+(aggregates, checkpoint SHA256 and provenance, sliding-window settings, software
+versions, metric definitions). Rows are flushed as they are produced, and
+`--resume` continues an interrupted run.
+
+`--mode raw` evaluates from the original NIfTIs in source CT geometry using the
+same path as unseen-scan inference; it exists for the one-time held-out test.
+Case IDs above `PanTS_00009000` are **refused** unless `--allow-test-split` is
+passed explicitly, so PanTS-te cannot be read by accident.
+
+### Figures
+
+```bash
+python scripts/analyze_segresnet.py \
+  --suprem-run <runs>/segresnet_suprem --random-run <runs>/segresnet_random \
+  --suprem-eval evaluation/suprem --random-eval evaluation/random \
+  --output figures/
+```
+
+Ten figures from files training and evaluation already wrote. A figure whose
+inputs are missing is skipped and reported rather than drawn from partial data,
+and a run that used `--max-steps-per-epoch` or `--limit-cases` is **refused**, so
+a calibration artifact cannot end up in a plot that looks like a result.
 
 ## Prepared training cache
 
@@ -490,7 +593,70 @@ python scripts/train_segresnet.py --initialization random --epochs <original> \
 python scripts/infer_segresnet.py \
   --input /any/path/scan.nii.gz --output predictions/ \
   --checkpoint outputs/runs/segresnet_random/best.pt --lesion-probability
+
+# a directory of CTs; for nested trees use a shell loop rather than a new flag
+for ct in /cohort/**/*.nii.gz; do
+  python scripts/infer_segresnet.py --input "$ct" \
+    --output "predictions/$(basename "${ct%%.nii.gz}")" \
+    --checkpoint best.pt --lesion-probability
+done
+
+# full deterministic fold-0 evaluation of one checkpoint (all 1,801 cases)
+python scripts/evaluate_segresnet.py --checkpoint <run>/best.pt \
+  --prepared-root <prepared-root> --manifest <prepared-root>/manifest.json \
+  --split pants_cv_v1.json --fold 0 --output evaluation/suprem/
+
+# figures from history.json + the evaluation output
+python scripts/analyze_segresnet.py \
+  --suprem-run <runs>/segresnet_suprem --random-run <runs>/segresnet_random \
+  --suprem-eval evaluation/suprem --random-eval evaluation/random \
+  --output figures/
 ```
+
+## Reproducibility contract
+
+Two different promises, and conflating them would be dishonest.
+
+**Experiment reproducibility.** Fixing the code (tag `segresnet-production-v1`,
+commit `afdb75f3`), the split (`pants_cv_v1.json`, SHA256
+`a4559f41…24ea91`), the manifest (SHA256 `f45e5b42…8faf15`), the prepared cache
+contract (`preprocessing.json`: RAS, 1.5 mm, `[-175,250]→[0,1]`, float16 image /
+uint8 label, 29 classes), the seed (317) and the hyperparameters above gives a
+controlled repeat of the experiment. It does **not** promise bit-for-bit
+identical weights across different GPUs, CUDA or cuDNN versions: algorithm
+selection, reduction order and TF32 behaviour differ by hardware. What is
+guaranteed is that both arms see the same data in the same order with the same
+augmentations, so the comparison between them remains controlled.
+
+**Inference reproducibility.** Given the same checkpoint, the same deterministic
+preprocessing and fixed sliding-window settings, inference is deterministic
+within one software/hardware stack. Across stacks, small floating-point
+differences can appear; the semantic contract — output shape, affine,
+orientation, integer labels 0–28, finite probabilities in [0,1] — is identical
+everywhere.
+
+Every checkpoint carries its own provenance block: resolved config, manifest and
+split SHA256, split seed, fold, class count, selection metric and value,
+monitoring-subset fingerprint, Git commit, torch version, device and AMP flag.
+
+## Artifact classification
+
+| Class | Items | In Git? |
+| --- | --- | --- |
+| **Source** | `src/`, `scripts/`, `tests/`, `notebooks/`, `pants_cv_v1.json`, `README.md`, `requirements.txt` | yes |
+| **Derived** | prepared npz cache, `pants_tr_manifest.json`, shard tars, `evaluation_cases.csv`, figures | no — rebuildable |
+| **Model state** | `latest.pt`, `best.pt` | no — delivered alongside the submission |
+| **Result** | `history.json`, `summary.json`, `provenance.json`, `evaluation_summary.json` | no — a summary table in this README is the tracked form |
+
+`pants_cv_v1.json` is the one generated file that *is* tracked, because it
+defines the experiment rather than describing a run of it.
+
+## Results
+
+Production training is running. **No performance numbers are reported here yet.**
+They will be added from the actual `evaluation_summary.json` files once both arms
+and the full 1,801-case fold-0 evaluation have completed. Nothing in this
+repository contains a placeholder, projected or illustrative result.
 
 ## Status
 
@@ -500,10 +666,14 @@ preprocessing and verified tumor-aware sampling; the portable prepared cache and
 its Drive transport; strict SuPreM transfer; one minimal trainer running both
 arms from either the cache or raw NIfTI; proven checkpoint/resume; memory-safe
 whole-volume inference with geometry restoration; internal evaluation metrics;
-unit and integration tests.
+the full-fold evaluator and the analysis/plotting script; unit and integration
+tests.
 
-Not yet implemented: production-scale training, any PanTS-te evaluation, and the
-submission inference package.
+In progress: the fold-0 production runs (`segresnet_suprem`, then
+`segresnet_random`, 60 epochs each).
+
+Not yet done: full 1,801-case evaluation of either arm, any PanTS-te evaluation,
+and the external submission package.
 
 ### nnU-Net: paused, not abandoned
 
