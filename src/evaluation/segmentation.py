@@ -29,7 +29,7 @@ def dice_score(
     When the label is absent from *both* prediction and target the score is
     undefined and ``empty_score`` (NaN by default) is returned rather than 1.0.
 
-    This matters for the lesion class: 8,074 of 9,000 PanTS-tr cases contain no
+    This matters for the lesion class: 8,118 of 9,000 PanTS-tr cases contain no
     lesion, so scoring empty/empty as a perfect 1.0 and averaging over all
     cases would report near-perfect tumor Dice for a model that never predicts
     a tumor at all.
