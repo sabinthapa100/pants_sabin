@@ -78,11 +78,27 @@ METRIC_DEFINITIONS = {
         "2|P n G| / (|P| + |G|) for class 28 in the evaluation frame; NaN when "
         "the class is absent from both prediction and ground truth"
     ),
-    "detected": "INTERNAL: ground truth has >0 class-28 voxels AND prediction has >0",
+    "lesion_dice_on_positive_cases": (
+        "PRIMARY. Mean lesion_dice over cases whose GROUND TRUTH contains class 28. "
+        "This is the model-selection quantity; lesion-negative cases never enter it."
+    ),
+    "detected": (
+        "INTERNAL: ground truth has >0 class-28 voxels AND prediction has >0. "
+        "Presence only - the predicted voxels need not overlap the true lesion, "
+        "so detected=True with lesion_dice=0.0 means a wrong-location prediction."
+    ),
     "false_positive": "INTERNAL: ground truth has 0 class-28 voxels AND prediction has >0",
     "internal_specificity": "1 - false_positive_rate_on_negative_cases",
-    "per_class_dice": "same Dice rule per label, averaged over cases where the label is in the ground truth",
-    "macro_foreground_dice": "unweighted mean of the per-class means over classes 1..28",
+    "per_class_support_dice": (
+        "Mean Dice per label over cases where the label occurs in the TARGET OR THE "
+        "PREDICTION. A case with the label absent from both is NaN and excluded; a "
+        "case where only the prediction has it contributes an exact 0.0. This is a "
+        "DIFFERENT quantity from lesion_dice_on_positive_cases, which conditions on "
+        "ground truth alone - compare class 28 across the two at your peril."
+    ),
+    "macro_foreground_dice": (
+        "unweighted mean of the per-class support means over classes 1..28"
+    ),
     "official_pants_metrics": (
         "NOT COMPUTED. P-Sen, T-Sen, Spe and AUC require JHU's unpublished "
         "component-matching, overlap-threshold and patient-scoring protocol. "
@@ -123,6 +139,16 @@ def parse_args() -> argparse.Namespace:
 # --------------------------------------------------------------------------- #
 # setup
 # --------------------------------------------------------------------------- #
+
+
+def content_sha256(payload: Any) -> str:
+    """The trainer's canonical content hash, so provenance can be cross-checked.
+
+    Must stay byte-compatible with ``SegResNetTrainer._content_hash``; a run's
+    checkpoint records the same function's output for the manifest and split.
+    """
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def file_sha256(path: Path) -> str:
@@ -256,6 +282,49 @@ def _stats(values: list[float]) -> dict[str, Any]:
         "std": float(array.std(ddof=1)) if array.size > 1 else 0.0,
         "p25": float(np.percentile(array, 25)),
         "p75": float(np.percentile(array, 75)),
+        "min": float(array.min()),
+        "max": float(array.max()),
+    }
+
+
+def outcome_groups(positives: list[dict[str, Any]]) -> dict[str, Any]:
+    """Split lesion-positive cases by *why* they scored what they scored.
+
+    ``detected`` only asks whether any class-28 voxel was predicted; it does not
+    ask whether those voxels touch the lesion. Group B is exactly the population
+    that separates a missing prediction from a misplaced one, and without it a
+    low mean Dice cannot be attributed to detection rather than localization.
+    """
+    no_prediction, zero_overlap, overlapping = [], [], []
+    for row in positives:
+        dice = row["lesion_dice"]
+        if not row["predicted_lesion_voxels"]:
+            no_prediction.append(row)
+        elif np.isnan(dice) or dice == 0.0:
+            zero_overlap.append(row)
+        else:
+            overlapping.append(row)
+
+    total = len(positives) or 1
+    return {
+        "definition": (
+            "lesion-positive cases partitioned by prediction outcome; A+B+C = all "
+            "lesion-positive cases"
+        ),
+        "A_no_lesion_predicted": {
+            "cases": len(no_prediction),
+            "fraction": len(no_prediction) / total,
+        },
+        "B_predicted_but_zero_overlap": {
+            "cases": len(zero_overlap),
+            "fraction": len(zero_overlap) / total,
+            "note": "prediction exists somewhere but shares no voxel with the lesion",
+        },
+        "C_positive_overlap": {
+            "cases": len(overlapping),
+            "fraction": len(overlapping) / total,
+            "dice_among_overlapping": _stats([r["lesion_dice"] for r in overlapping]),
+        },
     }
 
 
@@ -303,6 +372,7 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "primary_tumor_segmentation": {
             "lesion_positive_cases": lesion_summary["lesion_positive_cases"],
             "class28_dice_on_positive_cases": tumor,
+            "outcome_groups": outcome_groups(positives),
         },
         "internal_case_detection": {
             "INTERNAL": (
@@ -487,7 +557,14 @@ def main() -> int:
             "mode": args.mode,
             "evaluation_frame": "prepared_RAS_1.5mm" if args.mode == "prepared" else "source_ct_geometry",
             "fold": args.fold,
-            "split_sha256": hashlib.sha256(args.split.read_bytes()).hexdigest(),
+            # Two hashes of the same split, because they answer different
+            # questions. The file hash identifies these exact bytes on disk; the
+            # content hash uses the trainer's canonical serialization
+            # (json.dumps(sort_keys=True)) and is what checkpoint provenance
+            # records, so it is the one that can be compared against a run.
+            "split_file_sha256": hashlib.sha256(args.split.read_bytes()).hexdigest(),
+            "split_content_sha256": content_sha256(json.loads(args.split.read_text())),
+            "manifest_content_sha256": content_sha256(manifest),
             "manifest_version": manifest.get("meta", {}).get("version"),
             "cases_requested": len(cases),
             "cases_scored": len(rows),

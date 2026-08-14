@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.data.labels import CLASS_MAP
+from src.data.labels import CLASS_MAP, PANCREATIC_LESION
 from src.evaluation.segmentation import all_class_dice, per_class_dice
 from src.models.segresnet import build_segresnet
 from src.training.checkpoint import save_training_checkpoint
@@ -376,5 +376,122 @@ def test_evaluator_writes_the_documented_files(tmp_path, trained_checkpoint):
     assert summary["evaluation"]["evaluation_frame"] == "prepared_RAS_1.5mm"
     assert summary["evaluation"]["cases_failed"] == 0
     assert summary["evaluation"]["sliding_window"]["roi_size"] == [96, 96, 96]
-    assert summary["evaluation"]["split_sha256"]
+    # Both hashes, under names that say which is which. The content hash is the
+    # one comparable to checkpoint provenance; the file hash identifies bytes.
+    assert summary["evaluation"]["split_file_sha256"]
+    assert summary["evaluation"]["split_content_sha256"]
+    assert summary["evaluation"]["manifest_content_sha256"]
+    assert "split_sha256" not in summary["evaluation"], (
+        "the ambiguous single name is back; two hash conventions shared it"
+    )
     assert "NOT COMPUTED" in summary["metric_definitions"]["official_pants_metrics"]
+
+
+# --------------------------------------------------------------------------- #
+# outcome groups: a low mean Dice must be attributable to a mechanism
+# --------------------------------------------------------------------------- #
+
+
+def test_outcome_groups_separate_missing_from_misplaced_predictions():
+    """`detected` cannot distinguish these three, which is why the split exists.
+
+    A prediction that exists but touches nothing scores Dice 0 exactly like a
+    prediction that was never made, so the mean alone cannot say whether the
+    model failed to fire or fired in the wrong place.
+    """
+    volume = np.zeros((8, 8, 8), dtype=np.int16)
+    volume[1:3, 1:3, 1:3] = PANCREATIC_LESION
+
+    # A: ground truth has a lesion, model predicts none.
+    a = dict(evaluate._score(np.zeros_like(volume), volume.copy(), 1.0), case_id="a")
+
+    # B: model predicts a lesion in the wrong corner - zero overlap.
+    misplaced = np.zeros_like(volume)
+    misplaced[6:8, 6:8, 6:8] = PANCREATIC_LESION
+    b = dict(evaluate._score(misplaced, volume.copy(), 1.0), case_id="b")
+
+    # C: partial overlap.
+    partial = np.zeros_like(volume)
+    partial[1:3, 1:3, 1:2] = PANCREATIC_LESION
+    c = dict(evaluate._score(partial, volume.copy(), 1.0), case_id="c")
+
+    assert not a["detected"], "no predicted voxels cannot count as detected"
+    assert b["detected"] and b["lesion_dice"] == 0.0, (
+        "the misplaced case must look detected AND score zero - that is the trap"
+    )
+    assert c["lesion_dice"] > 0.0
+
+    groups = evaluate.outcome_groups([a, b, c])
+    assert groups["A_no_lesion_predicted"]["cases"] == 1
+    assert groups["B_predicted_but_zero_overlap"]["cases"] == 1
+    assert groups["C_positive_overlap"]["cases"] == 1
+    assert groups["C_positive_overlap"]["dice_among_overlapping"]["n"] == 1
+
+    total = sum(groups[k]["cases"] for k in
+                ("A_no_lesion_predicted", "B_predicted_but_zero_overlap", "C_positive_overlap"))
+    assert total == 3, "the three groups must partition the lesion-positive cases"
+
+
+def test_per_class_definition_states_the_support_convention():
+    """The documented definition must match what `all_class_dice` actually does."""
+    text = evaluate.METRIC_DEFINITIONS["per_class_support_dice"]
+    assert "TARGET OR THE PREDICTION" in text
+    assert "0.0" in text, "must say prediction-only cases contribute zero"
+    assert "per_class_dice" not in evaluate.METRIC_DEFINITIONS, (
+        "the old key claimed a ground-truth-only convention the code does not implement"
+    )
+    primary = evaluate.METRIC_DEFINITIONS["lesion_dice_on_positive_cases"]
+    assert "GROUND TRUTH" in primary and "PRIMARY" in primary
+
+
+def test_evaluation_records_both_split_hash_conventions():
+    """Two correct hashes under one name looked like a provenance contradiction."""
+    payload = {"meta": {"version": "x"}, "folds": []}
+    assert evaluate.content_sha256(payload) == _trainer_content_hash(payload), (
+        "the evaluator's content hash must match the trainer's, or checkpoint "
+        "provenance cannot be cross-checked against an evaluation"
+    )
+
+
+def _trainer_content_hash(payload):
+    from src.training.trainer import SegResNetTrainer
+
+    return SegResNetTrainer._content_hash(payload)
+
+
+# --------------------------------------------------------------------------- #
+# history gaps must look like gaps
+# --------------------------------------------------------------------------- #
+
+
+def test_missing_epochs_break_the_curve_instead_of_bridging_it():
+    """The Random run lost epochs to a resume bug; the plot must not hide that.
+
+    Plotting the surviving records against their own index draws a straight
+    segment from epoch 39 to epoch 55 that a reader would take for measured
+    training. NaN at the missing epochs makes matplotlib lift the pen.
+    """
+    history = [{"epoch": e, "train_loss": 1.0} for e in (0, 1, 2, 39, 55, 56)]
+
+    epochs, values = analyze.contiguous_series(history, "train_loss")
+
+    assert epochs == list(range(0, 57)), "x-axis must span the full observed range"
+    assert len(values) == len(epochs)
+    for epoch in (0, 1, 2, 39, 55, 56):
+        assert values[epoch] == 1.0, f"measured epoch {epoch} was altered"
+    for epoch in (3, 20, 38, 40, 54):
+        assert math.isnan(values[epoch]), f"epoch {epoch} was never observed"
+    assert sum(1 for v in values if math.isnan(v)) == 57 - 6
+
+
+def test_contiguous_series_invents_nothing_when_history_is_complete():
+    history = [{"epoch": e, "train_loss": float(e)} for e in range(5)]
+    epochs, values = analyze.contiguous_series(history, "train_loss")
+    assert epochs == [0, 1, 2, 3, 4]
+    assert values == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert not any(math.isnan(v) for v in values)
+
+
+def test_contiguous_series_handles_a_key_absent_from_every_record():
+    history = [{"epoch": e, "train_loss": 1.0} for e in range(3)]
+    assert analyze.contiguous_series(history, "selection") == ([], [])

@@ -128,7 +128,10 @@ def main() -> int:
     print("\n=== run summary ===")
     print(f"experiment          {summary['experiment']} ({summary['initialization']})")
     print(f"epochs completed    {summary['epochs_completed']}")
-    print(f"optimizer steps     {summary['global_step']}")
+    # One per DataLoader iteration, not per optimizer update. The two coincide
+    # only at accumulation=1, which production uses; the label must not imply
+    # otherwise if a memory-constrained run ever accumulates.
+    print(f"training iterations {summary['global_step']}")
     print(f"selection metric    {summary['selection_metric']}")
     # best_metric starts at -inf and stays there if no deterministic validation
     # ever produced a finite score, so isfinite (not isnan) is the right guard.

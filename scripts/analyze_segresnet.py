@@ -150,19 +150,35 @@ def _finish(fig, axis, output: Path, name: str, dpi: int) -> str:
     return name
 
 
+def contiguous_series(history: list[dict], key: str) -> tuple[list[int], list[float]]:
+    """Reindex a per-epoch quantity onto the full integer epoch range.
+
+    A resumed run can leave holes in history.json. Plotting the surviving
+    records directly draws a straight segment across the hole, which reads as
+    measured data. Filling missing epochs with NaN makes matplotlib lift the
+    pen instead, so a gap looks like a gap. Nothing is interpolated.
+    """
+    values = {int(r["epoch"]): r[key] for r in history if key in r}
+    if not values:
+        return [], []
+    span = range(min(values), max(values) + 1)
+    return list(span), [values.get(epoch, math.nan) for epoch in span]
+
+
 def curve(histories, output, dpi, key, title, ylabel, name, logy=False) -> str | None:
-    """One per-epoch quantity, both arms overlaid."""
+    """One per-epoch quantity, both arms overlaid. Missing epochs break the line."""
     fig, axis = plt.subplots(figsize=(7, 4.2))
     drawn = False
     for arm in ARMS:
         history = histories.get(arm)
         if not history:
             continue
-        epochs = [r["epoch"] for r in history]
-        values = [r[key] for r in history if key in r]
-        if len(values) != len(epochs):
+        epochs, values = contiguous_series(history, key)
+        if not epochs:
             continue
-        axis.plot(epochs, values, color=COLOR[arm], label=LABEL[arm], linewidth=1.8)
+        missing = sum(1 for v in values if math.isnan(v))
+        label = LABEL[arm] + (f"  ({missing} epochs missing)" if missing else "")
+        axis.plot(epochs, values, color=COLOR[arm], label=label, linewidth=1.8)
         drawn = True
     if not drawn:
         plt.close(fig)
@@ -269,7 +285,10 @@ def per_class_dice_plot(summaries, output, dpi) -> str | None:
                          rotation=60, ha="right", fontsize=7)
     lesion_index = FOREGROUND_CLASSES.index(PANCREATIC_LESION)
     axis.axvspan(lesion_index - 0.5, lesion_index + 0.5, color="red", alpha=0.08)
-    axis.set_ylabel("mean Dice (cases where the class is in the ground truth)")
+    # Support convention, not ground-truth-only: a case where the class appears
+    # in the prediction alone contributes an exact 0.0. Class 28 here is
+    # therefore NOT the primary lesion metric.
+    axis.set_ylabel("mean support Dice (class in target OR prediction)")
     axis.set_title("Per-class Dice, fold-0 validation. Shaded: class 28 pancreatic lesion",
                    fontsize=11)
     axis.set_ylim(0, 1)
