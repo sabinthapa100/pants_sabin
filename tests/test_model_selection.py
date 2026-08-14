@@ -29,7 +29,7 @@ requires_cache = pytest.mark.skipif(
 
 
 def make_trainer(tmp_path, **overrides) -> SegResNetTrainer:
-    config = TrainingConfig(
+    settings = dict(
         experiment="selection_test",
         initialization="random",
         prepared_root=prepared_root,
@@ -44,8 +44,9 @@ def make_trainer(tmp_path, **overrides) -> SegResNetTrainer:
         patch_validation_batches=2,
         validate_every_epochs=1,
         output_root=str(tmp_path / "runs"),
-        **overrides,
     )
+    settings.update(overrides)
+    config = TrainingConfig(**settings)
     manifest = json.loads((Path(prepared_root) / "manifest.json").read_text())
     split = json.loads(SPLIT.read_text())
     return SegResNetTrainer(config, manifest=manifest, split=split)
@@ -151,3 +152,90 @@ def test_resume_refuses_a_changed_monitoring_subset(tmp_path):
     other = make_trainer(tmp_path, monitoring_negatives=7)
     with pytest.raises(ValueError, match="Monitoring subset changed"):
         other.resume(persistent / "selection_test" / "latest.pt")
+
+
+@requires_cache
+def test_cli_summary_keys_all_exist(tmp_path):
+    """A 64-epoch run must not train successfully and then die while printing.
+
+    The CLI once formatted summary['best_val_loss'], a key fit() never returns,
+    so every completed run ended in a KeyError after the work was done. This
+    reads the keys the CLI actually asks for out of its source and checks them
+    against a real summary, which is cheap and catches any future rename.
+    """
+    import re
+
+    trainer = make_trainer(tmp_path)
+    trainer.monitoring_cases = trainer.monitoring_cases[:1]
+    summary = trainer.fit()
+
+    source = (PROJECT_ROOT / "scripts" / "train_segresnet.py").read_text()
+    requested = set(re.findall(r"summary\[[\"']([a-z_]+)[\"']\]", source))
+    assert requested, "no summary keys found - did the CLI stop printing a summary?"
+
+    missing = sorted(requested - set(summary))
+    assert not missing, f"CLI formats keys fit() never returns: {missing}"
+
+    # The reported quantity must be the deterministic selection metric.
+    assert summary["selection_metric"] == "mean_dice_on_positive_cases"
+    assert "best_val_loss" not in source, "the stale val-loss key is back"
+
+
+@requires_cache
+def test_resume_extends_history_instead_of_replacing_it(tmp_path):
+    """A resumed run must leave one chronological record, not just its own segment."""
+    persistent = tmp_path / "drive" / "PanTS_runs"
+    first = make_trainer(tmp_path, persistent_output_root=str(persistent), epochs=2)
+    first.monitoring_cases = first.monitoring_cases[:1]
+    first.fit()
+    assert [record["epoch"] for record in first.history] == [0, 1]
+
+    resumed = make_trainer(tmp_path, persistent_output_root=str(persistent), epochs=4)
+    resumed.monitoring_cases = resumed.monitoring_cases[:1]
+    resumed.resume(persistent / "selection_test" / "latest.pt")
+    assert [record["epoch"] for record in resumed.history] == [0, 1], "prior epochs lost"
+
+    resumed.fit()
+    epochs = [record["epoch"] for record in resumed.history]
+    assert epochs == [0, 1, 2, 3], f"history is not contiguous from 0: {epochs}"
+    assert len(epochs) == len(set(epochs)), "duplicate epoch records"
+
+    written = json.loads((persistent / "selection_test" / "history.json").read_text())
+    assert [record["epoch"] for record in written] == [0, 1, 2, 3]
+
+
+@requires_cache
+def test_resume_reads_history_from_the_persistent_mirror(tmp_path):
+    """On a fresh Colab VM the local run directory is empty; Drive is the fallback."""
+    persistent = tmp_path / "drive" / "PanTS_runs"
+    first = make_trainer(tmp_path, persistent_output_root=str(persistent), epochs=2)
+    first.monitoring_cases = first.monitoring_cases[:1]
+    first.fit()
+
+    # A fresh VM has the Drive mirror but an empty local run directory; the
+    # resume cell copies back only latest.pt, not history.json.
+    (tmp_path / "runs" / "selection_test" / "history.json").unlink()
+
+    resumed = make_trainer(tmp_path, persistent_output_root=str(persistent), epochs=4)
+    resumed.monitoring_cases = resumed.monitoring_cases[:1]
+    resumed.resume(persistent / "selection_test" / "latest.pt")
+    assert [record["epoch"] for record in resumed.history] == [0, 1]
+
+
+@requires_cache
+def test_resume_rejects_a_history_that_does_not_match_the_checkpoint(tmp_path):
+    persistent = tmp_path / "drive" / "PanTS_runs"
+    first = make_trainer(tmp_path, persistent_output_root=str(persistent), epochs=2)
+    first.monitoring_cases = first.monitoring_cases[:1]
+    first.fit()
+
+    # A history missing epoch 0 cannot be extended without leaving a gap.
+    history_path = persistent / "selection_test" / "history.json"
+    records = json.loads(history_path.read_text())
+    history_path.write_text(json.dumps(records[1:]))
+    (tmp_path / "runs" / "selection_test" / "history.json").unlink()
+
+    resumed = make_trainer(tmp_path, persistent_output_root=str(persistent), epochs=4)
+    resumed.monitoring_cases = resumed.monitoring_cases[:1]
+    with pytest.raises(ValueError, match="contiguously"):
+        resumed.resume(persistent / "selection_test" / "latest.pt")
