@@ -4,8 +4,8 @@ The same command runs both arms; only --initialization changes.
 """
 
 import argparse
-import json
 import logging
+import math
 import os
 import sys
 from pathlib import Path
@@ -122,16 +122,26 @@ def main() -> int:
 
     summary = trainer.fit()
 
+    run_dir = Path(config.output_root) / config.experiment
+    best = summary["best_selection_metric"]
+
     print("\n=== run summary ===")
-    print(f"experiment      {summary['experiment']} ({summary['initialization']})")
-    print(f"epochs          {summary['epochs_completed']}")
-    print(f"best val loss   {summary['best_val_loss']:.4f}")
-    print(f"global steps    {summary['global_step']}")
-    print(f"runtime         {summary['total_seconds']:.1f}s")
+    print(f"experiment          {summary['experiment']} ({summary['initialization']})")
+    print(f"epochs completed    {summary['epochs_completed']}")
+    print(f"optimizer steps     {summary['global_step']}")
+    print(f"selection metric    {summary['selection_metric']}")
+    # best_metric starts at -inf and stays there if no deterministic validation
+    # ever produced a finite score, so isfinite (not isnan) is the right guard.
+    print(f"best value          {best:.4f}" if math.isfinite(best) else
+          "best value          n/a (no finite deterministic score was recorded)")
+    print(f"best epoch          {summary['best_epoch']}")
+    print(f"monitoring subset   {summary['monitoring_cases']} cases "
+          f"({summary['monitoring_subset_fingerprint']})")
+    print(f"runtime             {summary['total_seconds'] / 3600:.2f} h")
     if summary["peak_gpu_gb"] is not None:
-        print(f"peak GPU VRAM   {summary['peak_gpu_gb']:.2f} GB")
-    print(f"artifacts       {Path(config.output_root) / config.experiment}")
-    print(json.dumps(summary["history"], indent=2))
+        print(f"peak GPU VRAM       {summary['peak_gpu_gb']:.2f} GB")
+    print(f"artifacts           {run_dir}")
+    print(f"full per-epoch history: {run_dir / 'history.json'}")
     return 0
 
 
