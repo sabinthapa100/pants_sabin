@@ -1,33 +1,36 @@
-# PyTorch is intentionally NOT pinned here.
+# PyTorch is intentionally NOT pinned.
 #
-# The correct wheel depends on your GPU, CUDA runtime, and platform, so install
-# it first following https://pytorch.org/get-started/locally/ and only then run
-# `pip install -r requirements.txt`.
+# The correct wheel depends on your GPU, CUDA runtime and platform. Install it
+# first from https://pytorch.org/get-started/locally/, then run
+# `pip install -r requirements.txt`. Pinning a CUDA build here would make the
+# repository non-portable: the Colab runtime and a local laptop do not use the
+# same wheel, and both are used in this study.
 #
-# Verified working combination for this repository:
-#   Python      3.11.15
-#   PyTorch     2.13.0+cu126
-#   MONAI       1.5.1
-#   nnU-Net v2  2.8.1
+# Stacks this code has actually run on:
+#   laptop  Python 3.11.15, PyTorch 2.13.0+cu126, MONAI 1.5.1
+#   Colab   Python 3.12.13, PyTorch 2.11.0+cu128, MONAI 1.5.1
 #
-# nnunetv2 and monai both declare a torch dependency, so an existing correct
+# monai and nnunetv2 both declare a torch dependency, so an existing correct
 # torch install is respected rather than replaced.
 
-# Imported directly by this repository.
+# --- required at runtime: data, model, inference -------------------------
 numpy
 nibabel
-matplotlib
-pandas           # manifest.py only, to read the optional metadata.xlsx
-openpyxl         # the .xlsx engine pandas needs; not imported by name
+monai==1.5.1          # SegResNet, transforms, sliding-window inference
 
-# scipy, scikit-image, SimpleITK and tqdm were listed here but are never
-# imported by this project; nnunetv2 declares them and pip installs them.
-# PyYAML was left over from the deleted configs/ directory.
+# --- evaluation and figures ----------------------------------------------
+matplotlib            # scripts/analyze_segresnet.py, src/data/visualize.py
 
-# 3D SegResNet, transforms, and sliding-window inference.
-monai==1.5.1
+# --- optional: manifest metadata QC --------------------------------------
+# Imported lazily in src/data/manifest.py to read the optional metadata.xlsx
+# `tumor?` column. Without them the manifest is still built; the QC flag is
+# simply omitted.
+pandas
+openpyxl              # the .xlsx engine pandas needs; never imported by name
 
-# Independent nnU-Net v2 baseline.
+# --- optional: independent nnU-Net baseline (currently paused) -----------
+# Imported lazily in src/data/nnunet.py. Not needed for the SegResNet study.
 nnunetv2==2.8.1
 
+# --- development ---------------------------------------------------------
 pytest==9.1.1

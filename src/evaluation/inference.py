@@ -21,35 +21,13 @@ def predict_logits(
     sw_device: str | torch.device | None = None,
     device: str | torch.device | None = "cpu",
 ) -> torch.Tensor:
-    """Return full-volume logits using MONAI sliding-window inference.
+    """Full-volume class logits for ``image`` ``[B,C,H,W,D]``, via sliding window.
 
-    Memory model
-    ------------
-    The stitched output is the expensive object, not the patches: a
-    ``512 x 512 x 300`` volume at 29 classes in float32 is roughly 9 GB, which
-    is what previously exhausted VRAM. MONAI separates the two devices, so by
-    default the windows are evaluated on the model's device (``sw_device``)
-    while the accumulator lives on the host (``device="cpu"``). Only one patch
-    of activations is ever resident in VRAM.
-
-    Pass ``device=None`` to keep the accumulator wherever the input already is.
-
-    Parameters
-    ----------
-    model:
-        A model mapping ``[B, C, H, W, D]`` to class logits.
-    image:
-        Preprocessed 5D tensor ``[B, C, H, W, D]``.
-    roi_size:
-        Sliding-window spatial patch size.
-    overlap:
-        Fractional overlap between neighboring windows.
-    sw_batch_size:
-        Windows evaluated simultaneously. Keep at 1 unless VRAM is plentiful.
-    sw_device:
-        Where patches are executed. Defaults to the model's own device.
-    device:
-        Where the full-volume output is accumulated. Defaults to CPU.
+    The stitched output, not the patches, is the expensive object: 29 classes of
+    float32 over a large CT is several GB. Windows therefore execute on
+    ``sw_device`` (the model's GPU) while the accumulator lives on ``device``
+    (the host by default), so only one patch of activations is ever in VRAM.
+    Pass ``device=None`` to accumulate wherever the input already is.
     """
     if image.ndim != 5:
         raise ValueError(f"Expected [B,C,H,W,D] input; got shape {tuple(image.shape)}")

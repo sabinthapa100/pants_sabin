@@ -108,27 +108,13 @@ class AlignLabelGeometryd(MapTransform):
     """
     Force the label to share the CT's world-coordinate affine.
 
-    In 80 of the 9,000 PanTS-tr cases the ``combined_labels`` affine is
-    degenerate: the translation is zeroed and the direction matrix is reset to
-    LPS, even though the label array is stored index-aligned with the CT. Shape
-    and voxel spacing always agree, so the two arrays correspond one-to-one.
+    80 of the 9,000 PanTS-tr labels carry a degenerate affine while their voxel
+    array is index-aligned with the CT. Without this repair ``Orientationd``
+    would reorient image and label by *different* affines and silently mirror
+    the annotation, training on left/right-flipped anatomy with no error raised.
 
-    Without this correction, ``Orientationd`` would reorient the image and the
-    label by *different* affines and silently mirror the annotation for those
-    cases - training the model on left/right-flipped anatomy with no error
-    raised anywhere.
-
-    Which array is authoritative was established against the *standalone*
-    per-structure masks in ``LabelTr/<case>/segmentations/``, not by intensity
-    plausibility. Across all 80 affected cases, 1,852 of 1,852 class
-    comparisons found the combined-label voxels fully contained in the
-    corresponding standalone mask, and every one of the 80 cases has at least
-    one standalone mask whose affine *equals* the CT affine. The combined
-    arrays are therefore index-aligned with the CT and only the NIfTI affine
-    metadata is defective.
-
-    The transform is a no-op for the 8,920 cases whose affines already agree,
-    so it is applied unconditionally rather than from a per-case flag.
+    A no-op for the other 8,920 cases, so it is applied unconditionally rather
+    than from a per-case flag. Evidence in TECHNICAL_NOTES.md section 4.
     """
 
     def __init__(
@@ -336,17 +322,13 @@ def train_transforms(
     """
     Training pipeline from **raw NIfTI**: deterministic core, crop, augment.
 
-    Output per sample: ``image`` ``[1, 96, 96, 96]`` float, ``label``
-    ``[1, 96, 96, 96]`` integer-valued. With ``samples_per_case > 1`` the
-    transform emits a list of that many patches per case.
+    Emits ``samples_per_case`` patches of ``image``/``label`` ``[1, 96, 96, 96]``.
+    ``augment=False`` drops only the stochastic intensity stage, keeping the same
+    deterministic core and the same tumor-aware crop; it is used for patch
+    validation and for the tiny-overfit test.
 
-    ``augment=False`` drops the stochastic intensity transforms while keeping
-    the identical deterministic core and the identical tumor-aware crop. It is
-    used for patch-level validation loss and for the tiny-overfit test, where
-    augmentation would otherwise prevent the network from memorizing a sample.
-
-    The cache-fed equivalent is ``prepared.prepared_train_transforms``, which
-    reuses the two stochastic stages below verbatim.
+    ``prepared.prepared_train_transforms`` is the cache-fed equivalent and reuses
+    the two stochastic stages verbatim.
     """
 
     return Compose(
