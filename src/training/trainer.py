@@ -40,6 +40,12 @@ from .checkpoint import load_training_checkpoint, save_training_checkpoint
 
 logger = logging.getLogger(__name__)
 
+# Progress logging only. A long epoch is otherwise silent for half an hour, so
+# there is no way to tell a live run from a hung one. Neither constant touches
+# the RNG or the optimizer.
+LOG_EVERY_STEPS = 500
+LOG_EVERY_CASES = 50
+
 
 @dataclass(frozen=True)
 class TrainingConfig:
@@ -255,6 +261,8 @@ class SegResNetTrainer:
         accumulation = max(1, self.config.gradient_accumulation_steps)
         total = 0.0
         steps = 0
+        planned = self.config.max_steps_per_epoch or len(self.train_loader)
+        started = time.time()
         self.optimizer.zero_grad(set_to_none=True)
 
         for index, batch in enumerate(self.train_loader):
@@ -272,6 +280,13 @@ class SegResNetTrainer:
             total += float(loss.detach())
             steps += 1
             self.global_step += 1
+
+            if steps % LOG_EVERY_STEPS == 0:
+                rate = steps / (time.time() - started)
+                logger.info(
+                    "  step %d/%d  running train loss %.4f  %.2f steps/s  eta %.0f min",
+                    steps, planned, total / steps, rate, (planned - steps) / rate / 60,
+                )
 
             if self.config.max_steps_per_epoch and steps >= self.config.max_steps_per_epoch:
                 break
@@ -304,8 +319,10 @@ class SegResNetTrainer:
         self.model.eval()
         lesion_rows: list[dict[str, Any]] = []
         started = time.time()
+        total = len(self.monitoring_cases)
+        logger.info("deterministic whole-volume validation on %d monitoring cases", total)
 
-        for case_id in self.monitoring_cases:
+        for index, case_id in enumerate(self.monitoring_cases, 1):
             image, label = read_prepared_case(case_path(self.config.prepared_root, case_id))
             volume = torch.from_numpy(image.astype(np.float32))[None, None]
             logits = predict_logits(
@@ -316,6 +333,13 @@ class SegResNetTrainer:
             row["case_id"] = case_id
             lesion_rows.append(row)
             del logits, volume, prediction, image, label
+
+            if index % LOG_EVERY_CASES == 0 and index != total:
+                elapsed = time.time() - started
+                logger.info(
+                    "  validation %d/%d  %.1f s/case  eta %.0f min",
+                    index, total, elapsed / index, (total - index) * elapsed / index / 60,
+                )
 
         summary = summarize_lesion_metrics(lesion_rows)
         summary["seconds"] = time.time() - started
@@ -397,6 +421,7 @@ class SegResNetTrainer:
         self.global_step = int(checkpoint["global_step"])
         self.best_metric = float(checkpoint["best_metric"])
         self.resumed = True
+        self._restore_history(int(checkpoint["epoch"]))
 
         # Restore the selection state too, or a resumed run would forget which
         # score best.pt already holds and could overwrite a better checkpoint.
@@ -445,6 +470,45 @@ class SegResNetTrainer:
         path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
         self._persist(path)
 
+    def _restore_history(self, checkpoint_epoch: int) -> None:
+        """Reload the per-epoch record so a resume extends it instead of replacing it.
+
+        The history lives in history.json rather than inside the checkpoint: it
+        is already written and mirrored after every epoch, and embedding dozens
+        of nested epoch records in a file that is copied to Drive each epoch
+        would grow it for no gain. On a fresh Colab VM the local run directory
+        is empty, so the persistent mirror is the fallback.
+        """
+        for directory in (self.run_dir, self.persistent_dir):
+            if directory is None:
+                continue
+            path = directory / "history.json"
+            if path.is_file():
+                break
+        else:
+            logger.warning(
+                "no history.json found; this run will record only epochs from %d onward",
+                checkpoint_epoch + 1,
+            )
+            return
+
+        records = json.loads(path.read_text())
+        kept = [record for record in records if int(record["epoch"]) <= checkpoint_epoch]
+        epochs = [int(record["epoch"]) for record in kept]
+        if epochs != list(range(checkpoint_epoch + 1)):
+            raise ValueError(
+                f"{path} does not cover epochs 0..{checkpoint_epoch} contiguously "
+                f"(found {len(epochs)} record(s)); the checkpoint and the history "
+                "describe different runs, and appending would create gaps."
+            )
+        if len(kept) != len(records):
+            logger.info(
+                "discarding %d history record(s) after epoch %d, which this checkpoint predates",
+                len(records) - len(kept), checkpoint_epoch,
+            )
+        self.history = kept
+        logger.info("restored %d earlier epoch record(s) from %s", len(kept), path)
+
     def fit(self) -> dict[str, Any]:
         """Train, persisting `latest.pt` each epoch and `best.pt` on a real improvement.
 
@@ -462,6 +526,9 @@ class SegResNetTrainer:
             epoch_started = time.time()
             # the rate actually applied during this epoch, captured before stepping
             epoch_learning_rate = self.scheduler.get_last_lr()[0]
+            logger.info(
+                "epoch %d/%d starting (lr %.2e)", epoch, self.config.epochs - 1, epoch_learning_rate
+            )
             train_loss = self.train_epoch()
             patch_loss = self.validate()
             self.scheduler.step()
