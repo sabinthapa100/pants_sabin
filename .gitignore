@@ -29,6 +29,11 @@ outputs/
 evaluation_cases.csv
 evaluation_summary.json
 
+# Downloaded trained-run artifacts (checkpoints, history, provenance, summary).
+# MODEL STATE and RESULTS, not source. `*.pt` already covers the checkpoints;
+# this also covers the JSON that travels with them.
+/PanTS_run/
+
 # Derived case manifest: exactly reproducible from the raw data via
 # `scripts/prepare_data.py --manifest`. The fixed CV split it feeds
 # (pants_cv_v1.json) IS tracked, because that one defines the experiment.
