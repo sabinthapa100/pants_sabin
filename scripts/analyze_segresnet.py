@@ -323,6 +323,48 @@ def dice_vs_volume(cases, output, dpi) -> str | None:
     return _finish(fig, axis, output, "10_dice_vs_lesion_volume.png", dpi)
 
 
+def failure_modes(summaries, output, dpi) -> str | None:
+    """Why the lesion-positive cases scored what they did.
+
+    A mean Dice cannot distinguish a model that predicts nothing from one that
+    predicts in the wrong place - both score 0. Splitting the cases by outcome
+    is what makes the failure attributable.
+    """
+    groups = ("A_no_lesion_predicted", "B_predicted_but_zero_overlap", "C_positive_overlap")
+    names = ("A: no lesion\npredicted", "B: predicted,\nzero overlap", "C: positive\noverlap")
+
+    available = {}
+    for arm in ARMS:
+        summary = summaries.get(arm)
+        if not summary:
+            continue
+        primary = summary.get("results", {}).get("primary_tumor_segmentation", {})
+        if "outcome_groups" in primary:
+            available[arm] = primary["outcome_groups"]
+    if not available:
+        return None
+
+    fig, axis = plt.subplots(figsize=(7, 4.4))
+    width = 0.8 / len(available)
+    positions = np.arange(len(groups))
+    for index, (arm, outcome) in enumerate(available.items()):
+        counts = [outcome[g]["cases"] for g in groups]
+        offset = (index - (len(available) - 1) / 2) * width
+        bars = axis.bar(positions + offset, counts, width, color=COLOR[arm],
+                        alpha=0.8, label=LABEL[arm])
+        total = sum(counts)
+        for bar, count in zip(bars, counts):
+            axis.annotate(f"{count}\n{100 * count / total:.1f}%",
+                          (bar.get_x() + bar.get_width() / 2, count),
+                          ha="center", va="bottom", fontsize=8)
+    axis.set_xticks(positions)
+    axis.set_xticklabels(names, fontsize=9)
+    axis.set_ylabel("lesion-positive validation cases")
+    axis.set_title("Failure modes on lesion-positive cases (A + B + C = all)", fontsize=11)
+    axis.margins(y=0.18)
+    return _finish(fig, axis, output, "11_failure_modes.png", dpi)
+
+
 # --------------------------------------------------------------------------- #
 
 
@@ -372,6 +414,7 @@ def main() -> int:
         ("08_class28_dice_distribution.png", lambda: dice_distribution(cases, args.output, args.dpi)),
         ("09_per_class_dice.png", lambda: per_class_dice_plot(summaries, args.output, args.dpi)),
         ("10_dice_vs_lesion_volume.png", lambda: dice_vs_volume(cases, args.output, args.dpi)),
+        ("11_failure_modes.png", lambda: failure_modes(summaries, args.output, args.dpi)),
     ]
 
     for name, builder in figures:
