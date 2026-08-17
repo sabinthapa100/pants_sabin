@@ -24,6 +24,7 @@ import torch  # noqa: E402
 
 from src.data.labels import PANCREATIC_LESION  # noqa: E402
 from src.evaluation.inference import predict_case_in_source_geometry  # noqa: E402
+from src.evaluation.postprocessing import LESION_PEAK_PROBABILITY  # noqa: E402
 from src.models.segresnet import build_segresnet  # noqa: E402
 from src.training.checkpoint import load_training_checkpoint  # noqa: E402
 
@@ -46,6 +47,17 @@ def parse_args() -> argparse.Namespace:
         "--lesion-probability",
         action="store_true",
         help=f"also write {PROBABILITY_FILENAME} (class-28 softmax)",
+    )
+    parser.add_argument(
+        "--lesion-peak-probability",
+        type=float,
+        default=LESION_PEAK_PROBABILITY,
+        metavar="P",
+        help=(
+            "keep a class-28 component only if its peak softmax probability is >= P "
+            f"(default {LESION_PEAK_PROBABILITY}, the frozen development rule). "
+            "Pass a negative value to disable filtering and emit the raw argmax."
+        ),
     )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--overlap", type=float, default=0.5, help="sliding-window overlap")
@@ -122,6 +134,9 @@ def segment_case(model: torch.nn.Module, ct_path: Path, destination: Path, args)
         sw_device=args.device,
         accumulate_device=args.accumulate_device,
         want_lesion_probability=args.lesion_probability,
+        min_lesion_peak_probability=(
+            args.lesion_peak_probability if args.lesion_peak_probability >= 0 else None
+        ),
     )
 
     labels = np.asarray(result["labels"].detach().cpu())[0]
@@ -147,6 +162,7 @@ def segment_case(model: torch.nn.Module, ct_path: Path, destination: Path, args)
         "classes": sorted(int(v) for v in np.unique(labels)),
         "lesion_voxels": int((labels == PANCREATIC_LESION).sum()),
         "written": written,
+        "lesion_filter": result.get("lesion_filter"),
     }
 
 
@@ -169,6 +185,12 @@ def main() -> int:
         print(f"    shape           {report['shape']}")
         print(f"    classes present {report['classes']}")
         print(f"    class-28 voxels {report['lesion_voxels']}")
+        if report["lesion_filter"]:
+            audit = report["lesion_filter"]
+            print(f"    lesion filter   peak softmax >= {audit['rule']['min_peak_probability']}, "
+                  f"{audit['rule']['connectivity']}-connectivity: "
+                  f"{audit['components_retained']} kept, {audit['components_rejected']} rejected, "
+                  f"{audit['relabelled_voxels']} voxels relabelled")
         print(f"    -> {destination}/{', '.join(report['written'])}")
 
     if torch.cuda.is_available() and args.device.startswith("cuda"):

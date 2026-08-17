@@ -6,6 +6,11 @@ from .inference import (
     logits_to_labels,
     predict_logits,
 )
+from .postprocessing import (
+    LESION_COMPONENT_CONNECTIVITY,
+    LESION_PEAK_PROBABILITY,
+    filter_lesion_components,
+)
 from .segmentation import (
     dice_score,
     lesion_case_metrics,
@@ -14,7 +19,10 @@ from .segmentation import (
 )
 
 __all__ = [
+    "LESION_COMPONENT_CONNECTIVITY",
+    "LESION_PEAK_PROBABILITY",
     "dice_score",
+    "filter_lesion_components",
     "lesion_case_metrics",
     "lesion_mask",
     "lesion_probability",

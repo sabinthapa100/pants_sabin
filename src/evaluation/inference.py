@@ -100,12 +100,29 @@ def predict_case_in_source_geometry(
     sw_device: str | torch.device | None = None,
     accumulate_device: str | torch.device | None = "cpu",
     want_lesion_probability: bool = False,
+    min_lesion_peak_probability: float | None = None,
 ) -> dict[str, Any]:
     """
     Predict one case and map the result back onto the source CT grid.
 
     Returns ``labels`` (integer 0...28) and optionally ``lesion_probability``,
     both as MetaTensors carrying the *source* affine and shape.
+
+    ``min_lesion_peak_probability`` enables the frozen component filter
+    (see :mod:`..evaluation.postprocessing`); ``None`` leaves the raw argmax
+    untouched. Filtering runs in the canonical 1.5 mm frame, BEFORE inversion,
+    because component identity and physical size are only well defined on the
+    isotropic grid the model actually saw - after inversion to a possibly 5 mm
+    anisotropic source lattice, "the same" component has a different voxel
+    count and can even split. The filter's audit record is returned under
+    ``lesion_filter``.
+
+    The continuous ``lesion_probability`` map is deliberately NOT modified when
+    a component is rejected. It carries the model's raw class-28 evidence and
+    is the only input a future threshold or ranking analysis could use;
+    zeroing it would destroy that and bake this development threshold into
+    data that should outlive it. Postprocessing defines the final hard label
+    map, nothing else.
 
     The two outputs are inverted differently on purpose: the semantic label map
     must use nearest-neighbour resampling, or the inverse would interpolate
@@ -140,7 +157,17 @@ def predict_case_in_source_geometry(
         device=accumulate_device,
     )
 
-    predicted_labels = logits_to_labels(logits)[0].to(torch.float32)
+    predicted_labels = logits_to_labels(logits)
+    lesion_filter = None
+    if min_lesion_peak_probability is not None:
+        from .postprocessing import filter_lesion_components
+
+        lesion_filter = filter_lesion_components(
+            logits, predicted_labels, min_peak_probability=min_lesion_peak_probability
+        )
+        predicted_labels = lesion_filter.pop("labels")
+
+    predicted_labels = predicted_labels[0].to(torch.float32)
     probability = (
         lesion_probability(logits)[0].to(torch.float32) if want_lesion_probability else None
     )
@@ -163,6 +190,8 @@ def predict_case_in_source_geometry(
         return restored
 
     result: dict[str, Any] = {"labels": invert(predicted_labels, nearest=True)}
+    if lesion_filter is not None:
+        result["lesion_filter"] = lesion_filter
     if probability is not None:
         result["lesion_probability"] = invert(probability, nearest=False)
 

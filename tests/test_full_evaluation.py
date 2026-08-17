@@ -118,7 +118,7 @@ def test_production_split_contains_no_test_cases():
 @requires_split
 def test_resolve_cases_returns_the_whole_fold_sorted(tmp_path):
     args = evaluate.argparse.Namespace(
-        split=SPLIT, fold=0, limit=None, allow_test_split=False
+        split=SPLIT, fold=0, limit=None, allow_test_split=False, case_list=None
     )
     cases = evaluate.resolve_cases(args)
     split = json.loads(SPLIT.read_text())
@@ -129,9 +129,43 @@ def test_resolve_cases_returns_the_whole_fold_sorted(tmp_path):
 
 @requires_split
 def test_resolve_cases_rejects_an_out_of_range_fold():
-    args = evaluate.argparse.Namespace(split=SPLIT, fold=9, limit=None, allow_test_split=False)
+    args = evaluate.argparse.Namespace(
+        split=SPLIT, fold=9, limit=None, allow_test_split=False, case_list=None
+    )
     with pytest.raises(SystemExit, match="fold 9"):
         evaluate.resolve_cases(args)
+
+
+@pytest.mark.parametrize("body", [
+    '["PanTS_00000007", "PanTS_00000002"]',
+    '{"cases": ["PanTS_00000007", "PanTS_00000002"]}',
+    "PanTS_00000007\nPanTS_00000002\n",
+])
+def test_case_list_accepts_the_three_documented_forms(tmp_path, body):
+    path = tmp_path / "cases.txt"
+    path.write_text(body)
+    assert evaluate.read_case_list(path) == ["PanTS_00000002", "PanTS_00000007"]
+
+
+def test_case_list_overrides_the_split_and_still_guards_held_out_ids(tmp_path):
+    """The held-out gate must not be bypassable by the new enumeration path."""
+    path = tmp_path / "cases.json"
+    path.write_text('["PanTS_00009001"]')
+    args = evaluate.argparse.Namespace(
+        split=SPLIT, fold=0, limit=None, allow_test_split=False, case_list=path
+    )
+    with pytest.raises(SystemExit, match="PanTS-te"):
+        evaluate.resolve_cases(args)
+
+    args.allow_test_split = True
+    assert evaluate.resolve_cases(args) == ["PanTS_00009001"]
+
+
+def test_case_list_rejects_an_empty_file(tmp_path):
+    path = tmp_path / "cases.txt"
+    path.write_text("\n\n  \n")
+    with pytest.raises(SystemExit, match="no case identifiers"):
+        evaluate.read_case_list(path)
 
 
 # --------------------------------------------------------------------------- #

@@ -1,120 +1,83 @@
-# PanTS 3D Pancreatic Tumor Segmentation
+# PanTS SegResNet Study
 
-## Goal
+## 1. Purpose
 
-Segment 28 abdominal structures plus the pancreatic lesion (class 28) from 3D CT,
-and measure how much a supervised 3D pretraining checkpoint (SuPreM) actually
-helps compared with training the identical network from random initialization.
-The comparison, not the leaderboard number, is the point of the study.
+Does supervised 3D pretraining help pancreatic lesion segmentation?
 
-## Dataset
+Two identical 3D SegResNets are trained on PanTS, one from random initialization
+and one from the SuPreM supervised abdominal-CT checkpoint. Architecture, split,
+preprocessing, sampling, loss, optimizer, schedule and every hyperparameter are
+held fixed; **initialization is the intended intervention**. The comparison, not
+a leaderboard number, is the point of the study.
+
+A third arm — nnU-Net v2 `3d_fullres` as an independent baseline — is **paused**.
+Its dataset definition, 9,000-case fingerprint and plan are complete and
+preserved.
+
+## 2. Dataset and split policy
 
 [PanTS](https://github.com/MrGiovanni/PanTS): `ImageTr/<case>/ct.nii.gz` and
 `LabelTr/<case>/combined_labels.nii.gz`.
 
 | | |
 | --- | --- |
-| PanTS-tr | 9,000 cases — **882 lesion-positive**, 8,118 lesion-negative |
-| PanTS-te | `PanTS_00009001`+ — **locked** until model selection is frozen |
-| Classes | 29 (background + 28 structures); class 28 is `pancreatic_lesion` |
-| Split | `pants_cv_v1.json`, seed 317, 5 folds stratified by class-28 presence |
-| Fold 0 | 7,199 train / 1,801 validation |
+| PanTS-tr | 9,000 cases — 882 lesion-positive, 8,118 lesion-negative |
+| PanTS-te | `PanTS_00009001`+ — **locked, never read** (see §12) |
+| Classes | 29 = background + 28 structures; class 28 is `pancreatic_lesion` |
+| Split | `pants_cv_v1.json` — tracked, seed 317, 5 folds stratified by class-28 presence |
+| Fold 0 | 7,199 train / 1,801 validation, of which 177 are lesion-positive |
 
-`lesion_present` is defined **only** by class 28 appearing in `combined_labels`.
-The metadata spreadsheet's `tumor?` column is carried for QC and never used as
-ground truth; the two disagree on 44 cases.
+`lesion_present` is defined **only** by class 28 appearing in
+`combined_labels`. The metadata spreadsheet's `tumor?` column is carried for QC
+and never used as ground truth; the two disagree on 44 cases.
 
-## Experimental design
+The split is **case-level, not patient-level**: the released metadata contains no
+patient identifier, so patient-level grouping is impossible. Case IDs above
+`PanTS_00009000` are refused by the evaluator unless `--allow-test-split` is
+passed explicitly.
 
-| Run | Model | Initialization |
-| --- | --- | --- |
-| `segresnet_random` | 3D SegResNet | seeded random |
-| `segresnet_suprem` | the **same** 3D SegResNet | SuPreM checkpoint (81 of 83 tensors) |
-| nnU-Net v2 `3d_fullres` | independent baseline | framework default — **paused** |
+## 3. Model
 
-Architecture, split, preprocessing, sampling, loss, optimizer, schedule and all
-training hyperparameters are held fixed; **initialization is the scientific
-intervention**. Execution hardware is recorded per run and is *not* assumed
-identical — see [Reproducibility](#reproducibility).
-
-nnU-Net is deliberately not forced through our preprocessing. It is
-self-configuring, and overriding its fingerprint would remove what makes it an
-independent baseline; it shares only the case partition.
-
-## Repository layout
-
-```text
-pants_sabin/
-├── pants_cv_v1.json      fixed 5-fold split — tracked, defines the experiment
-├── src/
-│   ├── data/             paths, labels, I/O, QC, manifest, transforms, prepared cache
-│   ├── models/           SegResNet + SuPreM transfer
-│   ├── training/         trainer + resumable checkpoints
-│   └── evaluation/       metrics + inference primitives
-├── scripts/              command-line entry points
-├── notebooks/            Colab orchestration only
-├── tests/
-└── TECHNICAL_NOTES.md    data QC evidence behind the preprocessing choices
-```
-
-## Setup
-
-Install PyTorch first, matched to your own GPU and CUDA runtime — the repository
-deliberately does not pin a CUDA build, because the Colab runtime and a local
-laptop do not use the same wheel.
-
-```bash
-pip install -r requirements.txt
-export PANTS_DATA_ROOT=/path/to/PanTS/data
-```
-
-## Data preparation
-
-```bash
-python scripts/prepare_data.py --manifest --split --workers 8
-python scripts/prepare_data.py --prepare-segresnet --output <prepared-root> --workers 4
-```
-
-The first command writes the case manifest and the fixed split. The second runs
-the deterministic preprocessing once and stores each case as a compressed `.npz`
-holding two plain arrays — `image` float16 `[D,H,W]` in [0,1] and `label` uint8
-`[D,H,W]` in 0–28. Training then reads the cache instead of repeating the same
-resampling every epoch. Writes are atomic, so an interrupted job resumes.
-
-## Preprocessing
-
-| Step | Choice | Why |
-| --- | --- | --- |
-| Orientation | `RAS` | seven source orientations occur in PanTS-tr, so canonicalizing is required, not cosmetic |
-| Spacing | 1.5 mm isotropic | z-spacing spans 0.4–10 mm; without resampling a fixed patch covers wildly different anatomy per case |
-| Patch | 96³ (144 mm/side) | fits the whole pancreas plus peripancreatic vessels in one window |
-| Intensity | `[-175, 250] HU → [0,1]`, clipped | the input domain of the SuPreM supervised pretraining, so transfer is tested on its own terms |
-| Sampling | tumor-aware, ratios 1:2:3 | the median lesion is ~0.013% of a volume; uniform crops would almost never see one |
-| Augmentation | intensity only | PanTS has laterality-paired labels, so a left–right flip would mislabel a mirrored kidney |
-
-Labels are always resampled with **nearest-neighbour**; linear interpolation
-would invent fractional class IDs such as 17.4. Reorientation and resampling are
-different operations: `Orientationd` permutes and flips axes (lossless index
-bookkeeping), `Spacingd` changes the sampling lattice and must interpolate.
-
-Evidence for each choice — the 1.5 mm lesion-preservation study, the degenerate
-label-affine repair, and the measured sampler behaviour — is in
-[TECHNICAL_NOTES.md](TECHNICAL_NOTES.md).
-
-## Model
-
-MONAI 3D SegResNet: `blocks_down=[1,2,2,4]`, `blocks_up=[1,1,1]`,
+MONAI 3D SegResNet — `blocks_down=[1,2,2,4]`, `blocks_up=[1,1,1]`,
 `init_filters=16`, 1 input channel, **29 output classes**, GroupNorm.
 
-SuPreM transfer (`supervised_suprem_segresnet_2100.pth`, 56,500,623 bytes,
-SHA256 `2db81dc0…89a3`): all 83 parameter names align with our architecture.
-**81 transfer.** Only `conv_final.2.conv.{weight,bias}` is excluded — it maps
-features to class logits, and SuPreM predicted 32 classes where PanTS needs 29.
-`conv_final.0` is a task-independent GroupNorm and *is* transferred. The loader
-raises unless exactly 81 tensors load, because a quietly half-initialized
-backbone would invalidate the comparison.
+SuPreM transfer (`supervised_suprem_segresnet_2100.pth`, SHA256 `2db81dc0…89a3`):
+all 83 parameter names align. **81 tensors transfer.** Only
+`conv_final.2.conv.{weight,bias}` is excluded — it maps features to class logits,
+and SuPreM predicted 32 classes where PanTS needs 29. The loader raises unless
+exactly 81 load, because a quietly half-initialized backbone would invalidate the
+comparison.
 
-## Training
+## 4. Preprocessing
+
+| Step | Choice |
+| --- | --- |
+| Orientation | `RAS` (seven source orientations occur in PanTS-tr) |
+| Spacing | 1.5 mm isotropic (native z-spacing spans 0.4–10 mm) |
+| Intensity | `[-175, 250] HU → [0,1]`, clipped — the SuPreM pretraining domain |
+| Patch | 96³ = 144 mm per side |
+| Sampling | tumor-aware, other : pancreas : lesion = 1 : 2 : 3 |
+| Augmentation | intensity only |
+
+Labels always resample with **nearest-neighbour**; linear interpolation would
+invent fractional class IDs such as 17.4. No spatial flips: PanTS has
+laterality-paired labels, so mirroring would mislabel a flipped kidney.
+
+Evidence behind each choice — the 1.5 mm lesion-preservation study, the
+degenerate label-affine repair, the measured sampler behaviour — is in
+[TECHNICAL_NOTES.md](TECHNICAL_NOTES.md).
+
+## 5. Training protocol
+
+Identical for both arms: 64 epochs, batch 2 cases × 2 patches, accumulation 1,
+AdamW lr 1e-4 / weight decay 1e-5, cosine annealing `T_max=64`, AMP, seed 317,
+`DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)`.
+3,600 iterations per epoch, **230,400 optimizer updates** total.
+
+`best.pt` is selected by **deterministic whole-volume** mean class-28 Dice over a
+fixed monitoring subset (all 177 fold-0 lesion-positive cases + 50 stride-sampled
+negatives = 227), evaluated every 5 epochs. Per-epoch patch-validation loss is
+diagnostic only and selects nothing. **Both arms selected epoch 59.**
 
 ```bash
 python scripts/train_segresnet.py --initialization suprem \
@@ -122,187 +85,168 @@ python scripts/train_segresnet.py --initialization suprem \
   --prepared-root <prepared-root> --manifest <prepared-root>/manifest.json \
   --split pants_cv_v1.json --fold 0 --epochs 64 \
   --batch-size 2 --samples-per-case 2 --accumulation 1 \
-  --learning-rate 1e-4 --weight-decay 1e-5 --num-workers 4 --seed 317 \
-  --save-every-epochs 1 --validate-every-epochs 5 --monitoring-negatives 50 \
-  --output-root outputs/runs --persistent-output-root <durable-dir>
+  --learning-rate 1e-4 --weight-decay 1e-5 --num-workers 4 --seed 317
 ```
 
-Production settings, identical for both arms:
+## 6. Development result — fold 0, 1,801 cases
 
-| | |
-| --- | --- |
-| Epochs | **64** |
-| Batch | 2 cases × 2 patches = 4 patches per forward |
-| Accumulation | 1 |
-| Optimizer | AdamW, lr 1e-4, weight decay 1e-5, cosine annealing (`T_max` = epochs) |
-| Loss | `DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)` |
-| Precision | AMP with `GradScaler` |
-| Seed | 317, applied **before** the model is constructed |
+**These are INTERNAL DEVELOPMENT quantities on PanTS-tr fold 0.**
 
-Vocabulary, for this exact run:
+| | Random | SuPreM | SuPreM + frozen rule |
+| --- | ---: | ---: | ---: |
+| mean class-28 Dice (177 positives) | 0.1614 | 0.2440 | **0.2437** |
+| positive overlap (C) / 177 | 60 | 95 | **90** |
+| predicted but zero overlap (B) | 3 | 19 | **10** |
+| no prediction (A) | 114 | 63 | **77** |
+| false-positive patients / 1,624 | 7 | 201 | **109** |
+| internal specificity | 0.9957 | 0.8762 | **0.9329** |
+| macro anatomy Dice (classes 1–27) | 0.6852 | 0.6917 | **0.6917** |
 
-- **case** — one patient CT plus its label map, resampled to RAS/1.5 mm
-- **patch** — a 96³ crop; 2 are drawn per case per epoch
-- **batch** — the tensor entering one forward pass, `[4,1,96,96,96]`
-- **iteration** — one forward + backward over one batch; **3,600 per epoch**
-- **optimizer update** — one `optimizer.step()`; also 3,600 per epoch, since
-  accumulation is 1
+**SuPreM raises lesion sensitivity substantially and costs specificity.** Mean
+Dice rises 51%, positive-overlap cases go 60 → 95, and small-lesion detection
+rises roughly fivefold — while false-positive patients rise 7 → 201. The frozen
+component rule recovers most of that specificity (201 → 109) for 5 overlap cases,
+all of which had Dice below 0.036, and leaves anatomy unchanged to 7 decimals.
 
-One epoch = 7,199 cases = **14,398 patch presentations**. (Nominal 3,600 × 4 =
-14,400; 7,199 is odd, so the last batch carries one case and two patches.) Over
-64 epochs: **230,400 optimizer updates**, the same order as the nnU-Net baseline
-this study compares against, whose default schedule is 250,000.
+**What these numbers are not.** They are not official PanTS **P-Sen**, **T-Sen**,
+**Spe**, **AUC** or benchmark **DSC**, and must not be compared to the published
+PanTS benchmark table. The PanTS repository contains no evaluator; patient-wise
+and tumor-wise sensitivity are defined in prose only, with no overlap threshold,
+component-matching rule, or patient-scoring convention published. "Detection"
+here means our own criterion — any predicted class-28 voxel. Empty-versus-empty
+Dice returns NaN rather than 1.0, and lesion Dice is averaged over
+lesion-positive cases only.
 
-Background is excluded from the Dice term because it fills most of every patch
-and would dominate the overlap signal; cross-entropy still sees it.
+## 7. Frozen final inference rule
 
-## Validation and model selection
-
-Two signals with different jobs:
-
-- **Patch-validation DiceCE** — every epoch, on random crops with augmentation
-  off. Cheap, stochastic, **diagnostic only**. It moves between calls on an
-  unchanged model and never selects anything.
-- **Deterministic whole-volume monitoring** — every 5 epochs on a fixed subset
-  of fold-0 validation: all **177 lesion-positive** cases plus **50** stride-
-  sampled negatives = **227 cases**. No random cropping, so re-running it on an
-  unchanged model returns the identical number.
-
-`best.pt` is written only when the mean class-28 Dice over the lesion-positive
-monitoring cases improves. `latest.pt` is written every epoch for resume, and
-both are mirrored to durable storage from inside the training process, so a dead
-runtime costs at most one epoch.
-
-## Evaluation
-
-```bash
-python scripts/evaluate_segresnet.py --checkpoint <run>/best.pt \
-  --prepared-root <prepared-root> --manifest <prepared-root>/manifest.json \
-  --split pants_cv_v1.json --fold 0 --output evaluation/suprem/
-
-python scripts/analyze_segresnet.py \
-  --suprem-run <runs>/segresnet_suprem --random-run <runs>/segresnet_random \
-  --suprem-eval evaluation/suprem --random-eval evaluation/random \
-  --output figures/
+```text
+model            SuPreM SegResNet, best.pt, epoch 59
+                 SHA256 54bbcf0ceb530fd929d352be11bc8d7b18d22c3925deb62d54fa3d6cfb4cef50
+preprocessing    RAS, 1.5 mm isotropic, HU [-175,250] → [0,1]
+inference        96³ windows, overlap 0.5, gaussian blending, CPU stitching
+hard prediction  argmax over 29 classes
+lesion filter    26-connectivity components of class 28;
+                 keep a component iff max class-28 softmax inside it >= 0.6
+rejected voxels  argmax over channels 0..27  (NOT forced to background)
+probability map  raw class-28 softmax, never postprocessed
 ```
 
-The evaluator scores **all 1,801** fold-0 validation cases with whole-volume
-sliding-window inference — no crops, no augmentation, no sampling — and writes
-`evaluation_cases.csv` (per case: lesion voxels and volume for target and
-prediction, class-28 Dice, internal detection and false-positive flags, seconds,
-Dice for every class 1–28) plus `evaluation_summary.json` (aggregates,
-checkpoint SHA256, sliding-window settings, software versions).
+The 0.6 threshold was selected from nine predeclared one-parameter candidates in
+an offline fold-0 study (`scripts/study_component_filters.py`). **It is a softmax
+threshold, not a calibrated 60% probability of malignancy**, and it is not
+claimed to be globally optimal.
 
-**These are internal development metrics.** The PanTS repository publishes no
-evaluator, and patient-wise / tumor-wise sensitivity are defined only in prose:
+Rejected voxels take the best non-lesion class because this is an exclusive
+29-class segmenter: forcing them to background would assert "outside body" in
+tissue the model believes is pancreas. On the full fold, 57.6% of rejected voxels
+became a real anatomical structure — a third pancreas-family — and only 42%
+background.
 
-| Benchmark column | Status |
-| --- | --- |
-| DSC | computed — plain class-28 Dice |
-| P-Sen | an **internal** case-detection rate (any predicted class-28 voxel) |
-| Spe | an **internal** `1 − FP rate` under the same criterion |
-| T-Sen | **not computed** — needs an unpublished component-matching rule |
-| AUC | **not computed** — needs an unpublished patient-scoring convention |
+Filtering is applied in the canonical 1.5 mm frame **before** inversion to source
+geometry, because component identity and physical size are only well defined on
+the isotropic grid the model actually saw.
 
-Empty-versus-empty Dice returns NaN, not 1.0: with 8,118 lesion-negative cases,
-scoring them as perfect would report near-perfect tumor Dice for a model that
-never predicts a tumor. Lesion Dice is averaged over lesion-positive cases only.
-`scripts/infer_segresnet.py` emits the continuous class-28 probability, so
-whoever holds the real protocol can compute their own operating points.
+**Two different defaults, deliberately.** `infer_segresnet.py` defaults to 0.6 —
+it is the deployment pipeline. `evaluate_segresnet.py` defaults to *no filtering*
+— it is a research instrument that must keep reproducing the unfiltered baseline.
+**The held-out evaluation must pass `--lesion-peak-probability 0.6` explicitly
+and must not rely on a default.**
 
-Case IDs above `PanTS_00009000` are refused unless `--allow-test-split` is
-passed, so PanTS-te cannot be read by accident.
-
-## Inference on an unseen CT
+## 8. Inference on an unseen CT
 
 ```bash
 python scripts/infer_segresnet.py \
+    --checkpoint PanTS_run/segresnet_suprem/best.pt \
     --input scan.nii.gz \
     --output predictions/ \
-    --checkpoint best.pt \
     --lesion-probability
 ```
 
-Needs **only** this repository, a trained checkpoint, and a raw CT. No training
-labels, no manifest, no split, no prepared cache, no Google Drive, no SuPreM
-pretraining file, and no PanTS naming convention. `--input` also accepts a
-directory of NIfTIs; for nested trees use a shell loop rather than a recursive
-scan, which would silently pick up label files in a mixed directory.
+This is the submission pipeline: the frozen 0.6 rule is the default. The explicit
+equivalent, preferred when the rule must be visible in the command record:
 
-```text
-raw CT (native grid)
-  → RAS → 1.5 mm → [-175,250] HU → [0,1]     image-only, same rules as training
-  → sliding-window inference, CPU stitching   ~0.45 GB VRAM
-  → argmax → labels 0..28, softmax → class-28 probability
-  → inverse transform to the SOURCE grid      nearest for labels, linear for probability
-  → combined_labels.nii.gz (uint8)
-  → pancreatic_lesion_probability.nii.gz (float32, optional)
+```bash
+python scripts/infer_segresnet.py \
+    --checkpoint PanTS_run/segresnet_suprem/best.pt \
+    --input scan.nii.gz --output predictions/ \
+    --lesion-peak-probability 0.6 --lesion-probability
 ```
 
-Outputs carry the source affine, shape and orientation. After training, `best.pt`
-is simply a PanTS model — the initialization it started from is provenance, not a
-runtime dependency.
+Needs **only** this repository, a checkpoint, and a raw CT — no labels, manifest,
+split, prepared cache, SuPreM pretraining file, or PanTS naming convention.
+`--input` also accepts a directory of NIfTIs.
 
-## Reproducibility
+## 9. Outputs
 
-Recorded in every checkpoint's provenance block and in
-`evaluation_summary.json`: git commit, split SHA256, manifest SHA256, seed, fold,
-class count, selection metric and value, monitoring-subset fingerprint, torch
-version, device, AMP flag. Checkpoint SHA256 is recorded at evaluation time.
+```text
+combined_labels.nii.gz                  uint8, integer labels 0..28
+pancreatic_lesion_probability.nii.gz    float32 in [0,1]  (with --lesion-probability)
+```
 
-| | |
-| --- | --- |
-| Production code | tag `segresnet-production-v1`, commit `afdb75f3` |
-| Split | `pants_cv_v1.json`, SHA256 `a4559f41…24ea91` |
-| Manifest | SHA256 `f45e5b42…8faf15` |
-| Cache contract | RAS, 1.5 mm, `[-175,250]→[0,1]`, float16 image / uint8 label, 29 classes |
-| Seed | 317 |
+Outputs are restored to the source CT shape, affine and orientation. Measured on
+one 493×282×117 CT: 15 s wall clock, 0.45 GB peak VRAM, 3.4 GB peak host RAM.
 
-**Experiment reproducibility** — fixing code, split, preprocessing, seed and
-hyperparameters gives a controlled repeat. It does **not** promise bit-for-bit
-identical weights across different GPUs, CUDA or cuDNN versions: algorithm
-selection, reduction order and TF32 behaviour differ by hardware.
+The probability map is the raw model output and is deliberately *not* filtered,
+so whoever holds the official protocol can compute their own operating points.
 
-**Inference reproducibility** — given the same checkpoint and fixed
-sliding-window settings, inference is deterministic within one software/hardware
-stack. Across stacks small floating-point differences can appear; the semantic
-contract (shape, affine, orientation, integer labels 0–28, finite probabilities
-in [0,1]) is identical everywhere.
+## 10. Reproducibility and environment
 
-**Hardware is not held constant between the two arms.** `segresnet_random` is
-training on a Colab Tesla T4; `segresnet_suprem` is planned for a local RTX 4070
-Laptop. Each run records its own GPU, VRAM, Python, PyTorch, MONAI and CUDA
-versions. The scientific protocol is controlled; the execution stack is
-documented rather than claimed identical.
+Tested: Python 3.11.15, PyTorch 2.13.0+cu126, MONAI 1.5.1, NumPy 2.4.6,
+SciPy 1.17.1, nibabel 5.4.2, NVIDIA RTX 4070 Laptop (8 GB).
 
-## Results
+Install PyTorch first, matched to your GPU and CUDA runtime — this repository
+deliberately does not pin a CUDA build.
 
-**Production training is in progress. No performance numbers are reported yet.**
-They will be added from the actual `evaluation_summary.json` files once both arms
-and the full 1,801-case fold-0 evaluation have completed. Nothing here is a
-placeholder, a projection, or an illustrative value.
+```bash
+pip install -r requirements.txt
+export PANTS_DATA_ROOT=/path/to/PanTS/data
+python scripts/prepare_data.py --manifest --split --workers 8
+python scripts/prepare_data.py --prepare-segresnet --output <prepared-root> --workers 4
+python -m pytest tests/ -q
+```
 
-## Status
+Every checkpoint and every `evaluation_summary.json` records git commit, split
+and manifest SHA256, seed, fold, selection metric and value, monitoring-subset
+fingerprint, sliding-window settings, torch version and device. Checkpoint SHA256
+is recorded at evaluation time.
 
-Complete: portable data root; validated 9,000-case manifest; fixed split; shared
-preprocessing with verified tumor-aware sampling; the portable prepared cache and
-its transport; strict SuPreM transfer; one trainer for both arms; checkpoint and
-resume; whole-volume inference with source-geometry restoration; the full-fold
-evaluator and the analysis figures; the test suite.
+Fixing code, split, preprocessing, seed and hyperparameters gives a controlled
+repeat; it does **not** promise bit-identical weights across GPUs, CUDA or cuDNN
+versions. The semantic output contract — shape, affine, orientation, integer
+labels 0–28, finite probabilities in [0,1] — holds everywhere.
 
-In progress: the fold-0 production runs, 64 epochs each.
+## 11. Limitations
 
-Not started: full 1,801-case evaluation, any PanTS-te evaluation, the external
-submission package.
+- **Not a hardware-controlled ablation.** Random trained on a Colab Tesla T4
+  (torch 2.11.0+cu128), SuPreM on a local RTX 4070 (torch 2.13.0+cu126).
+  The scientific protocol is controlled; the execution stack is recorded, not
+  claimed identical. Evaluation hardware and code were identical for both arms.
+- **The postprocessing threshold was tuned on fold 0**, the same fold that
+  selected the checkpoint, so fold-0 numbers are optimistic by an unmeasured
+  amount. Nine predeclared candidates on one axis is a small search, but not zero.
+- **Case-level split**, because no patient identifier is released. If a patient
+  contributed two scans they could fall on both sides of the split.
+- **1.5 mm resampling costs small lesions.** The smallest lesions fall to ~46
+  voxels; small-lesion Dice remains near 0.04 and is the weakest part of the model.
+- **Single fold, single seed.** No cross-fold variance or seed variance is measured.
+- **Class 21 (`pancreatic_duct`) scores 0.0** and classes 9/10 (femurs) score
+  below 0.2 — the intensity window saturates bone, an accepted trade for matching
+  SuPreM's pretraining domain.
+- **No calibration.** Softmax values are relative class preferences, not
+  calibrated probabilities.
 
-nnU-Net is **paused, not abandoned** — the dataset definition, the 9,000-case
-fingerprint and the `3d_fullres` plan are complete and preserved; production
-preprocessing resumes after the SegResNet study.
+## 12. PanTS-te status
 
-## Data rule
+**PanTS-te has NOT been evaluated. No held-out results exist in this repository.**
 
-Never modify anything under the PanTS data root. Develop on PanTS-tr; PanTS-te
-stays locked until the pipeline is frozen.
+No file under `ImageTe/` or `LabelTe/` has been opened. The raw held-out
+evaluation path is implemented and tested against synthetic NIfTI fixtures only
+(`tests/test_raw_evaluation.py`), which prove `--data-split test` resolves
+`ImageTe`/`LabelTe` without touching the real dataset.
+
+The one-shot held-out evaluation will run only after the checkpoint,
+preprocessing, postprocessing rule, inference implementation and metric
+definitions are frozen, committed, and tagged — and never more than once.
 
 ## References
 

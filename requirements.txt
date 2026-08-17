@@ -17,6 +17,10 @@
 numpy
 nibabel
 monai==1.5.1          # SegResNet, transforms, sliding-window inference
+# scipy.ndimage.label finds lesion connected components in postprocessing.py.
+# It arrives transitively with monai, but src/ now imports it directly, so it is
+# declared rather than assumed.
+scipy
 
 # --- evaluation and figures ----------------------------------------------
 matplotlib            # scripts/analyze_segresnet.py, src/data/visualize.py

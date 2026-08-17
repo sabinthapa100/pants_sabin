@@ -57,6 +57,11 @@ from src.evaluation.inference import (  # noqa: E402
     predict_case_in_source_geometry,
     predict_logits,
 )
+from src.evaluation.postprocessing import (  # noqa: E402
+    LESION_COMPONENT_CONNECTIVITY,
+    LESION_PEAK_PROBABILITY,
+    filter_lesion_components,
+)
 from src.evaluation.segmentation import (  # noqa: E402
     all_class_dice,
     lesion_case_metrics,
@@ -112,12 +117,36 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="results directory")
-    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument(
+        "--manifest", type=Path, default=None,
+        help=(
+            "prepared-cache manifest. Required for --mode prepared (it supplies the "
+            "voxel size); recorded for provenance only in --mode raw, where geometry "
+            "comes from each CT's own header, so a held-out run need not reference "
+            "the development cache at all."
+        ),
+    )
     parser.add_argument("--split", type=Path, default=PROJECT_ROOT / "pants_cv_v1.json")
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--mode", choices=["prepared", "raw"], default="prepared")
     parser.add_argument("--prepared-root", type=Path, default=None, help="required for --mode prepared")
     parser.add_argument("--data-root", type=Path, default=None, help="raw PanTS root for --mode raw")
+    parser.add_argument(
+        "--data-split", choices=["train", "test"], default="train",
+        help="raw-mode directory pair: train -> ImageTr/LabelTr, test -> ImageTe/LabelTe",
+    )
+    parser.add_argument(
+        "--case-list", type=Path, default=None,
+        help="explicit case IDs (JSON array/object or one per line); overrides --split/--fold",
+    )
+    parser.add_argument(
+        "--lesion-peak-probability", type=float, default=None, metavar="P",
+        help=(
+            f"keep a class-28 component only if its peak softmax >= P "
+            f"(frozen development rule: {LESION_PEAK_PROBABILITY}). Omitted by "
+            "default so this script reproduces the unfiltered baseline exactly."
+        ),
+    )
     parser.add_argument("--limit", type=int, default=None, help="evaluate only the first N cases")
     parser.add_argument("--resume", action="store_true", help="skip cases already in evaluation_cases.csv")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -218,9 +247,23 @@ def evaluate_prepared(model, case_id, args, voxel_mm3) -> dict[str, Any]:
         model, volume, overlap=args.overlap, sw_batch_size=args.sw_batch_size,
         sw_device=args.device, device=args.accumulate_device,
     )
-    prediction = logits_to_labels(logits)[0, 0].to("cpu").numpy().astype(np.int16)
-    del logits, volume
-    return _score(prediction, label.astype(np.int16), voxel_mm3)
+    labels = logits_to_labels(logits)
+    extra: dict[str, Any] = {}
+    if args.lesion_peak_probability is not None:
+        report = filter_lesion_components(
+            logits, labels, min_peak_probability=args.lesion_peak_probability
+        )
+        labels = report.pop("labels")
+        extra = {
+            "components_found": report["components_found"],
+            "components_retained": report["components_retained"],
+            "components_rejected": report["components_rejected"],
+            "relabelled_voxels": report["relabelled_voxels"],
+            "fallback_class_counts": report["fallback_class_counts"],
+        }
+    prediction = labels[0, 0].to("cpu").numpy().astype(np.int16)
+    del logits, volume, labels
+    return _score(prediction, label.astype(np.int16), voxel_mm3) | extra
 
 
 def evaluate_raw(model, case_id, args) -> dict[str, Any]:
@@ -232,14 +275,15 @@ def evaluate_raw(model, case_id, args) -> dict[str, Any]:
     """
     import nibabel as nib
 
-    paths = get_case_paths(case_id, "train", args.data_root)
+    paths = get_case_paths(case_id, args.data_split, args.data_root)
     result = predict_case_in_source_geometry(
         model, str(paths["ct"]), overlap=args.overlap,
         sw_batch_size=args.sw_batch_size, sw_device=args.device,
         accumulate_device=args.accumulate_device,
+        min_lesion_peak_probability=args.lesion_peak_probability,
     )
     prediction = np.asarray(result["labels"].detach().cpu())[0].astype(np.int16)
-    reference = nib.load(str(paths["combined_labels"]))
+    reference = nib.load(str(paths["combined"]))
     target = np.asarray(reference.dataobj).astype(np.int16)
     if prediction.shape != target.shape:
         raise RuntimeError(f"{case_id}: prediction {prediction.shape} != label {target.shape}")
@@ -443,11 +487,64 @@ def stratify_by_lesion_volume(rows: list[dict[str, Any]]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def summarize_filter_effect(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """What the component filter actually did, aggregated over the cohort.
+
+    ``fallback_classes`` answers the question the offline study could not: when a
+    lesion component is rejected, what does the model call those voxels instead?
+    A sensible distribution is dominated by pancreas-family and background; heavy
+    mass on distant organs would mean the fallback is not behaving anatomically.
+    """
+    fallback: dict[int, int] = {}
+    for row in rows:
+        for label, count in (row.get("fallback_class_counts") or {}).items():
+            fallback[int(label)] = fallback.get(int(label), 0) + int(count)
+    relabelled = sum(int(row.get("relabelled_voxels", 0) or 0) for row in rows)
+    return {
+        "cases_with_any_component": sum(1 for r in rows if (r.get("components_found") or 0) > 0),
+        "components_found": sum(int(r.get("components_found", 0) or 0) for r in rows),
+        "components_retained": sum(int(r.get("components_retained", 0) or 0) for r in rows),
+        "components_rejected": sum(int(r.get("components_rejected", 0) or 0) for r in rows),
+        "relabelled_voxels": relabelled,
+        "fallback_classes": {
+            str(label): {
+                "voxels": count,
+                "fraction": count / relabelled if relabelled else float("nan"),
+                "name": CLASS_MAP.get(label, "background" if label == 0 else "unknown"),
+            }
+            for label, count in sorted(fallback.items(), key=lambda kv: -kv[1])
+        },
+    }
+
+
+def read_case_list(path: Path) -> list[str]:
+    """Case IDs from a JSON array, a JSON object with ``cases``, or one per line.
+
+    The cross-validation split only names PanTS-tr cases, so a held-out
+    evaluation has no way to enumerate itself from it. This is the smallest
+    mechanism that lets the caller say which cases to score without inventing a
+    second split format.
+    """
+    text = path.read_text().strip()
+    if text.startswith(("[", "{")):
+        payload = json.loads(text)
+        cases = payload["cases"] if isinstance(payload, dict) else payload
+    else:
+        cases = [line.strip() for line in text.splitlines()]
+    cases = [case for case in cases if case]
+    if not cases:
+        raise SystemExit(f"{path} contains no case identifiers")
+    return sorted(dict.fromkeys(cases))
+
+
 def resolve_cases(args) -> list[str]:
-    split = json.loads(args.split.read_text())
-    if not 0 <= args.fold < len(split["folds"]):
-        raise SystemExit(f"fold {args.fold} outside 0..{len(split['folds']) - 1}")
-    cases = sorted(split["folds"][args.fold]["val"])
+    if args.case_list:
+        cases = read_case_list(args.case_list)
+    else:
+        split = json.loads(args.split.read_text())
+        if not 0 <= args.fold < len(split["folds"]):
+            raise SystemExit(f"fold {args.fold} outside 0..{len(split['folds']) - 1}")
+        cases = sorted(split["folds"][args.fold]["val"])
     guard_split(cases, args.allow_test_split)
     return cases[: args.limit] if args.limit else cases
 
@@ -481,9 +578,11 @@ def main() -> int:
 
     if args.mode == "prepared" and not args.prepared_root:
         raise SystemExit("--mode prepared needs --prepared-root")
+    if args.mode == "prepared" and not args.manifest:
+        raise SystemExit("--mode prepared needs --manifest")
 
     cases = resolve_cases(args)
-    manifest = json.loads(args.manifest.read_text())
+    manifest = json.loads(args.manifest.read_text()) if args.manifest else None
     args.output.mkdir(parents=True, exist_ok=True)
     cases_csv = args.output / "evaluation_cases.csv"
 
@@ -509,6 +608,10 @@ def main() -> int:
          "target_lesion_mm3", "predicted_lesion_mm3", "lesion_dice", "detected",
          "false_positive", "inference_seconds"]
         + [f"dice_{label:02d}" for label in FOREGROUND_CLASSES]
+        # Only when filtering is active, so an unfiltered run's CSV keeps exactly
+        # the columns it always had and stays comparable to earlier baselines.
+        + (["components_found", "components_retained", "components_rejected",
+            "relabelled_voxels"] if args.lesion_peak_probability is not None else [])
     )
 
     failures: list[dict[str, str]] = []
@@ -553,19 +656,61 @@ def main() -> int:
             "training_git_commit": checkpoint.get("git_commit"),
         },
         "evaluation": {
+            # Derived from the case IDs actually scored, never from a flag the
+            # caller sets, so a held-out run cannot be mislabelled development.
+            "cohort": (
+                "PanTS-te in-distribution held-out evaluation"
+                if any(case_number(c) > LAST_TRAIN_CASE_ID for c in cases)
+                else "PanTS-tr development evaluation"
+            ),
             "git_commit": git_commit(),
             "mode": args.mode,
             "evaluation_frame": "prepared_RAS_1.5mm" if args.mode == "prepared" else "source_ct_geometry",
             "fold": args.fold,
+            "data_split": args.data_split,
+            "case_list": str(args.case_list) if args.case_list else None,
+            "postprocessing": (
+                {
+                    "rule": "keep class-28 component iff peak softmax >= threshold",
+                    "min_peak_probability": args.lesion_peak_probability,
+                    "connectivity": LESION_COMPONENT_CONNECTIVITY,
+                    "applied_in": "canonical RAS 1.5 mm frame, before any inversion",
+                    "rejected_voxel_fallback": "argmax over logit channels 0..27",
+                    "notice": (
+                        "development rule selected on fold 0; a softmax threshold, "
+                        "NOT a calibrated probability of malignancy"
+                    ),
+                }
+                if args.lesion_peak_probability is not None
+                else None
+            ),
+            "postprocessing_audit": (
+                summarize_filter_effect(rows)
+                if args.lesion_peak_probability is not None
+                else None
+            ),
             # Two hashes of the same split, because they answer different
             # questions. The file hash identifies these exact bytes on disk; the
             # content hash uses the trainer's canonical serialization
             # (json.dumps(sort_keys=True)) and is what checkpoint provenance
             # records, so it is the one that can be compared against a run.
-            "split_file_sha256": hashlib.sha256(args.split.read_bytes()).hexdigest(),
-            "split_content_sha256": content_sha256(json.loads(args.split.read_text())),
-            "manifest_content_sha256": content_sha256(manifest),
-            "manifest_version": manifest.get("meta", {}).get("version"),
+            # Null when an explicit --case-list defined the cohort instead: a held-out
+            # run is not selected by the development split, and recording a hash of a
+            # file it never consulted would misstate its provenance.
+            "split_file_sha256": (
+                hashlib.sha256(args.split.read_bytes()).hexdigest()
+                if args.split and not args.case_list else None
+            ),
+            "split_content_sha256": (
+                content_sha256(json.loads(args.split.read_text()))
+                if args.split and not args.case_list else None
+            ),
+            "case_list_sha256": (
+                hashlib.sha256(args.case_list.read_bytes()).hexdigest()
+                if args.case_list else None
+            ),
+            "manifest_content_sha256": content_sha256(manifest) if manifest else None,
+            "manifest_version": manifest.get("meta", {}).get("version") if manifest else None,
             "cases_requested": len(cases),
             "cases_scored": len(rows),
             "cases_failed": len(failures),
