@@ -114,7 +114,7 @@ class AlignLabelGeometryd(MapTransform):
     the annotation, training on left/right-flipped anatomy with no error raised.
 
     A no-op for the other 8,920 cases, so it is applied unconditionally rather
-    than from a per-case flag. Evidence in TECHNICAL_NOTES.md section 4.
+    than from a per-case flag. Evidence in METHODS_AND_QC.md section 4.
     """
 
     def __init__(

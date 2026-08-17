@@ -1,7 +1,22 @@
-# Technical notes
+# Methods and QC
 
 Evidence behind the preprocessing decisions summarised in the README. Kept
 separate because it is needed to *justify* the pipeline, not to *use* it.
+
+## 0. Data provenance and label ontology
+
+The image and label files used in this study came from the **PanTSMini**
+distribution (<https://huggingface.co/datasets/BodyMaps/PanTSMini>), fetched with
+the upstream `download_PanTS_data.sh`. All credit for the dataset belongs to the
+PanTS project (<https://github.com/MrGiovanni/PanTS>).
+
+`combined_labels.nii.gz` is an **exclusive** semantic map assembled from
+per-structure annotations that can otherwise be overlapping or hierarchical
+(`LabelTr/<case>/segmentations/` ships those separately). A voxel can therefore
+carry only one identifier even where two annotations legitimately overlap.
+Consequently **class 17 should not automatically be interpreted as whole-pancreas
+Dice**: whatever the assembly rule assigns to the head, body, tail and duct
+classes is unavailable to class 17.
 
 ## 1. Why 1.5 mm isotropic
 
@@ -26,8 +41,9 @@ nearest-neighbour) was run over all 882 lesion-positive cases:
 | Relative volume error, mean absolute | 0.037 |
 
 The two lost lesions are `PanTS_00005043` (4 voxels, 1.8 mm³) and
-`PanTS_00000044` (16 voxels, 7.1 mm³) — roughly 1.5 mm and 2.4 mm across, well
-below the size at which a pancreatic lesion is clinically actionable. Physical
+`PanTS_00000044` (16 voxels, 7.1 mm³) — roughly 1.5 mm and 2.4 mm across. Both
+lesions were below the effective resolution of the 1.5-mm representation and were
+vulnerable to disappearance during resampling. Physical
 volume is preserved essentially exactly at the median, which is the reassuring
 part: nearest-neighbour resampling rescales the voxel count in proportion to the
 voxel-size ratio without systematically eroding or dilating the structure.
@@ -143,53 +159,3 @@ million distinct values instead of 29.
 Mean sliding-window geometry over real prepared volumes: ~56 windows per case at
 96³ with 0.5 overlap, moving ~5.3 GiB device-to-host per case when accumulating
 on CPU. That transfer, not GPU compute, dominates whole-volume validation cost.
-
-## 8. Engineering smoke run (not a result)
-
-A 3-epoch run over a 40-case lesion-balanced cohort (32 train / 8 val) on an 8 GB
-RTX 4070 Laptop, kept only as evidence that the plumbing works:
-
-| Arm | train loss | val loss | steps | runtime | peak VRAM |
-| --- | --- | --- | --- | --- | --- |
-| random | 4.119 → 3.894 | 3.979 → 3.913 | 96 | 79 s | 2.90 GB |
-| SuPreM | 4.337 → 3.698 | 3.982 → **3.633** | 96 | 83 s | 2.90 GB |
-
-After 3 epochs neither arm predicts any lesion voxel (max class-28 probability
-≈ 0.09). **These are engineering numbers only** — three epochs on 32 cases is far
-short of convergence for the rarest class, and they must not be read as a
-comparison between initializations.
-
-## 9. Paused nnU-Net baseline
-
-The nnU-Net production data definition, the full 9,000-case fingerprint and the
-experiment planning are complete. Production preprocessing is paused and will
-resume after the SegResNet study.
-
-Preserved unchanged: `src/data/nnunet.py`, `scripts/prepare_nnunet.py`, the
-`Dataset500_PanTS` symlink dataset, `dataset_fingerprint.json`,
-`nnUNetPlans.json`, and `splits_final.json` derived from `pants_cv_v1.json`. The
-`3d_fullres` plan is spacing `[1.25, 0.793, 0.793]`, patch `[64, 160, 192]`,
-batch 2, `CTNormalization`, `NibabelIOWithReorient`. That plan must not be
-modified to fit a hardware budget.
-
-## 10. Prepared-cache transport
-
-`npz` is already compressed, so shards are **uncompressed** `tar` — tar
-aggregates, it does not compress. Bundling avoids thousands of tiny cloud objects.
-
-```bash
-cd <prepared-root>
-ls cases/*.npz | sort > /tmp/all && split -d -l <N> /tmp/all /tmp/shard_
-for part in /tmp/shard_*; do
-  tar --create --file "shards/segresnet_shard_${part##*_}.tar" \
-      --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner --files-from "$part"
-done
-sha256sum shards/*.tar manifest.json preprocessing.json > SHA256SUMS
-sha256sum -c SHA256SUMS
-
-rclone copy . gdrive:PanTS_prepared/segresnet --exclude "cases/**" --transfers 8 --progress
-rclone check . gdrive:PanTS_prepared/segresnet --exclude "cases/**"
-```
-
-Fixed metadata makes the shards byte-reproducible, and re-running `rclone copy`
-transfers only what is missing, which is how an interrupted upload resumes.
