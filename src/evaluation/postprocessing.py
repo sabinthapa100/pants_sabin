@@ -1,48 +1,22 @@
 """Connected-component postprocessing of the predicted pancreatic-lesion class.
 
-The model over-predicts class 28: on fold-0 development data it flags 201 of
-1,624 lesion-free patients, and the spurious components are systematically
-smaller and less confident than genuine ones. This module removes the weakest
-of them with a single-parameter rule chosen in an offline development study.
+Rule: keep a hard class-28 connected component only if the maximum class-28
+softmax probability inside it is >= 0.6. The threshold was selected from nine
+predeclared candidates on fold 0 -- the same fold that selected the checkpoint,
+so its development numbers are optimistic by an unmeasured amount.
 
-THE RULE
-    Keep a hard class-28 connected component if and only if the maximum
-    class-28 softmax probability anywhere inside it is >= 0.6.
+0.6 is a threshold on the model's own softmax, not a calibrated probability of
+malignancy; with 29 competing classes a voxel can win the argmax at 0.3.
 
-``0.6`` is a threshold on the model's own softmax output. It is NOT a
-calibrated 60% probability of malignancy: the network was never calibrated, and
-with 29 competing classes a voxel can win the argmax at 0.3.
+Rejected voxels take ``argmax`` over channels 0..27 rather than background.
+This is an exclusive 29-class segmenter, so forcing class 0 would assert
+"outside body" in tissue the model believes is pancreas or vessel. Dropping
+channel 28 cannot reorder the rest: softmax divides every channel by one shared
+denominator, so removing a term rescales the survivors by a positive constant
+and preserves their order -- hence a plain argmax on logits.
 
-WHY REJECTED VOXELS ARE NOT SET TO BACKGROUND
-    This is an exclusive 29-class segmenter, so a voxel the model called lesion
-    is a voxel it believes is *something*. Forcing it to class 0 would assert
-    "air/outside body" and inject an anatomy error into a region the model may
-    confidently consider pancreas or vessel. Instead each rejected voxel takes
-    ``argmax`` over channels 0..27 -- the best non-lesion explanation the model
-    already computed.
-
-    Dropping channel 28 cannot reorder channels 0..27. Softmax is
-    ``p_k = e^{z_k} / Z`` with a denominator shared by every channel, so
-    removing a term from ``Z`` rescales all remaining probabilities by one
-    positive constant and preserves their order. The ranking of 0..27 is
-    therefore identical whether computed from the 29-class softmax, the
-    28-class softmax, or the raw logits -- which is why this is implemented as
-    a plain ``argmax`` on logits.
-
-    The rejected voxel does NOT return to the class it would have had if the
-    model had never predicted lesion; it returns to the runner-up the model
-    itself ranked second. Those are the same thing here, because argmax over a
-    subset is exactly "the best remaining option".
-
-SCOPE
-    This defines the final hard semantic label map only. The continuous class-28
-    probability map is deliberately left untouched -- see
-    ``predict_case_in_source_geometry``.
-
-DEVELOPMENT PROVENANCE
-    The threshold was selected from nine predeclared candidates on fold 0, the
-    same fold that selected the checkpoint. It is not a globally optimal value
-    and its fold-0 numbers are optimistic by an unmeasured amount.
+Only the hard label map is affected. The continuous class-28 probability map is
+left untouched; see ``predict_case_in_source_geometry``.
 """
 
 from __future__ import annotations
@@ -70,13 +44,12 @@ def lesion_peak_probability_map(
     logits: torch.Tensor,
     lesion_class: int = PANCREATIC_LESION,
 ) -> torch.Tensor:
-    """Class-``lesion_class`` softmax probability, ``[D, H, W]``.
+    """Class-``lesion_class`` softmax probability, shape ``[D, H, W]``.
 
-    Uses ``exp(z_k - logsumexp(z))`` rather than ``softmax(z)[k]`` so only one
-    single-channel map is allocated instead of a second 29-channel float32
-    volume -- for a typical prepared case, ~40 MB instead of ~1.2 GB. The two
-    are the same function; on real logits from this model (range about
-    [-92, +17]) they agree to ~3e-7, well inside float32 noise.
+    Uses ``exp(z_k - logsumexp(z))`` rather than ``softmax(z)[k]`` to allocate
+    one single-channel map instead of a second 29-channel float32 volume
+    (~40 MB versus ~1.2 GB for a typical case). The two agree to ~3e-7 on this
+    model's logit range.
     """
     if logits.ndim != 5:
         raise ValueError(f"expected [B,C,D,H,W] logits; got {tuple(logits.shape)}")
@@ -115,19 +88,18 @@ def filter_lesion_components(
 
     Parameters
     ----------
-    logits
-        ``[1, C, D, H, W]`` float class scores in the frame the components are
-        to be measured in. Must be the *same* logits ``labels`` came from.
-    labels
-        ``[1, 1, D, H, W]`` integer semantic labels, i.e. ``argmax`` over
-        ``logits``.
+    logits : torch.Tensor
+        Full-volume class scores, shape ``[1, C, D, H, W]``, in the frame the
+        components are measured in. Must be the logits ``labels`` came from.
+    labels : torch.Tensor
+        Hard semantic labels, shape ``[1, 1, D, H, W]``.
 
-    Returns a dict with the filtered ``labels`` (a new tensor; the input is
-    never mutated), one record per component, the number of relabelled voxels,
-    and how many of those went to each fallback class.
-
-    Every voxel that was not part of a rejected component is bit-identical to
-    the input, including voxels of other classes and retained lesion voxels.
+    Returns
+    -------
+    dict
+        Filtered ``labels`` (a new tensor; the input is never mutated), one
+        record per component, the relabelled voxel count, and the fallback
+        class distribution. Voxels outside a rejected component are unchanged.
     """
     from scipy import ndimage
 

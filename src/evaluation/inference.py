@@ -108,21 +108,18 @@ def predict_case_in_source_geometry(
     Returns ``labels`` (integer 0...28) and optionally ``lesion_probability``,
     both as MetaTensors carrying the *source* affine and shape.
 
-    ``min_lesion_peak_probability`` enables the frozen component filter
-    (see :mod:`..evaluation.postprocessing`); ``None`` leaves the raw argmax
-    untouched. Filtering runs in the canonical 1.5 mm frame, BEFORE inversion,
-    because component identity and physical size are only well defined on the
-    isotropic grid the model actually saw - after inversion to a possibly 5 mm
-    anisotropic source lattice, "the same" component has a different voxel
-    count and can even split. The filter's audit record is returned under
-    ``lesion_filter``.
+    ``min_lesion_peak_probability`` enables the frozen component filter (see
+    :mod:`..evaluation.postprocessing`); ``None`` leaves the raw argmax
+    untouched, and the filter's audit record is returned under
+    ``lesion_filter``. Filtering runs in the canonical 1.5 mm frame, BEFORE
+    inversion, because component identity and physical size are only well
+    defined on the isotropic grid the model saw; on an anisotropic source
+    lattice the same component has a different voxel count and can split.
 
-    The continuous ``lesion_probability`` map is deliberately NOT modified when
-    a component is rejected. It carries the model's raw class-28 evidence and
-    is the only input a future threshold or ranking analysis could use;
-    zeroing it would destroy that and bake this development threshold into
-    data that should outlive it. Postprocessing defines the final hard label
-    map, nothing else.
+    The continuous ``lesion_probability`` map is deliberately not modified when
+    a component is rejected: it carries the raw class-28 evidence any future
+    threshold or ranking analysis would need. Postprocessing defines the hard
+    label map only.
 
     The two outputs are inverted differently on purpose: the semantic label map
     must use nearest-neighbour resampling, or the inverse would interpolate
