@@ -24,6 +24,9 @@ scipy
 
 # --- evaluation and figures ----------------------------------------------
 matplotlib            # scripts/analyze_segresnet.py, src/data/visualize.py
+# ROC curve, AUROC and the bipartite tumor matching behind T-Sen.
+# scipy.sparse.csgraph supplies the matching; scikit-learn supplies the ROC.
+scikit-learn          # src/evaluation/benchmark_metrics.py
 
 # --- optional: manifest metadata QC --------------------------------------
 # Imported lazily in src/data/manifest.py to read the optional metadata.xlsx
