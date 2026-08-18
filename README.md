@@ -12,6 +12,8 @@ initialization, followed by one frozen held-out PanTS-te evaluation.
 - PanTSMini distribution: <https://huggingface.co/datasets/BodyMaps/PanTSMini>
 - SuPreM code and weights: <https://github.com/MrGiovanni/SuPreM>
 
+**Run the model:** [installation and inference quick start](submission/README.md#quick-start)
+
 ## Data
 
 PanTS-tr 9,000 cases; PanTS-te 901 cases; 29 exclusive semantic classes; class 28 is the
@@ -111,7 +113,7 @@ Supplementary:
 
 ```bash
 python scripts/infer_segresnet.py \
-    --checkpoint best.pt \
+    --checkpoint PanTS_run/segresnet_suprem/best.pt \
     --input unseen_ct.nii.gz \
     --output output/ \
     --lesion-peak-probability 0.6 \
@@ -132,7 +134,7 @@ SuPreM checkpoint.
 | --- | --- |
 | Inference code tag | `pants-submission-v1` (`72813b288db26dd0f887fe9d29a007fa46bcc764`) |
 | Metric code tag | `pants-metrics-v1` (`b3fa3a9e13db5510446c9847a7ddde3378f4e5dd`) |
-| Final package tag | `pants-submission-v4` |
+| Final package tag | `pants-submission-v5` |
 | Final checkpoint SHA256 | `54bbcf0ceb530fd929d352be11bc8d7b18d22c3925deb62d54fa3d6cfb4cef50` (epoch 59) |
 | Environment | Python 3.11.15, PyTorch 2.13.0+cu126, MONAI 1.5.1 |
 
