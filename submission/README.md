@@ -5,10 +5,82 @@ Kent State University
 <sthapa3@kent.edu>
 
 Repository: <https://github.com/sabinthapa100/pants_sabin>
-Final package tag: **`pants-submission-v3`**
+Final package tag: **`pants-submission-v4`**
 Inference code tag: `pants-submission-v1` (`72813b28`)
 Metric code tag: `pants-metrics-v1` (`b3fa3a9e`)
 Checkpoint: `best.pt`, SHA256 `54bbcf0ceb530fd929d352be11bc8d7b18d22c3925deb62d54fa3d6cfb4cef50`
+
+## Quick start
+
+```bash
+# A. clone the final package
+git clone --branch pants-submission-v4 \
+    https://github.com/sabinthapa100/pants_sabin.git
+cd pants_sabin
+
+# B. environment
+conda create -n pants python=3.11 -y
+conda activate pants
+
+# C. install a PyTorch build that matches your machine FIRST.
+#    Follow https://pytorch.org/get-started/locally/ and pick the CPU or CUDA
+#    wheel for your platform. Tested here with 2.13.0+cu126.
+
+# D. remaining runtime dependencies
+python -m pip install -r submission/requirements.txt
+
+# E. checkpoint (54 MB)
+mkdir -p PanTS_run/segresnet_suprem
+python -m pip install gdown
+gdown "https://drive.google.com/file/d/1GnQuaOzr7ZMzAB67OmNg2h6eO7FYN4rm/view?usp=sharing" \
+  -O PanTS_run/segresnet_suprem/best.pt
+
+# F. verify the checkpoint before using it
+echo "54bbcf0ceb530fd929d352be11bc8d7b18d22c3925deb62d54fa3d6cfb4cef50  PanTS_run/segresnet_suprem/best.pt" \
+  | sha256sum -c -
+
+# G. segment one CT
+python scripts/infer_segresnet.py \
+    --checkpoint PanTS_run/segresnet_suprem/best.pt \
+    --input /path/to/unseen_ct.nii.gz \
+    --output output/ \
+    --lesion-peak-probability 0.6 \
+    --lesion-probability
+```
+
+On `gdown` 5.x and earlier the share URL needs an extra flag,
+`gdown --fuzzy "<url>" -O ...`; `gdown` 6.x removed that flag and resolves the
+URL by default. The bare file ID works on every version and is the safest
+fallback:
+
+```bash
+gdown 1GnQuaOzr7ZMzAB67OmNg2h6eO7FYN4rm -O PanTS_run/segresnet_suprem/best.pt
+```
+
+Or download the file manually from the link and place it at the same path.
+
+The checkpoint is 56,536,035 bytes. Any other size means the download did not
+complete, and step F will fail rather than let a truncated file reach the model.
+
+### Batch mode
+
+`--input` also accepts a directory. Discovery is **flat, not recursive**: files
+ending in `.nii.gz` or `.nii` directly inside that directory are processed in
+sorted order, and subdirectories are ignored.
+
+```bash
+python scripts/infer_segresnet.py \
+    --checkpoint PanTS_run/segresnet_suprem/best.pt \
+    --input /path/to/ct_folder/ \
+    --output output/ \
+    --lesion-peak-probability 0.6 \
+    --lesion-probability
+```
+
+With more than one volume the outputs are written per case to
+`output/<filename-without-extension>/`. With exactly one volume — whether given
+as a file or as a directory holding a single CT — they are written directly to
+`output/`.
 
 ## Model
 
@@ -49,8 +121,42 @@ combined_labels.nii.gz                  uint8, integer labels 0..28
 pancreatic_lesion_probability.nii.gz    float32 in [0,1], class-28 softmax
 ```
 
-Both are restored to the source CT shape, affine and orientation. Peak VRAM ~0.45 GB;
+`combined_labels.nii.gz` is the semantic map: `uint8`, integer classes 0..28,
+where 28 is the pancreatic lesion. A lesion-only binary mask is
+`combined_labels == 28`. It is the postprocessed map, so every class-28
+component in it has a peak softmax of at least 0.6.
+
+`pancreatic_lesion_probability.nii.gz` is the raw class-28 softmax as `float32`,
+finite and within [0,1]. It is deliberately **not** filtered by the 0.6 rule, so
+it retains the continuous evidence needed for a different threshold or for a
+ROC/AUC analysis. It is not a calibrated probability of malignancy: softmax over
+29 competing classes says which class wins, not how often such a voxel is truly
+tumor.
+
+Both are restored to the source CT shape, affine and orientation, so they
+overlay the input CT directly with no resampling. Peak VRAM ~0.45 GB;
 ~8 s per case on an RTX 4070 Laptop.
+
+A single unlabeled CT cannot produce Dice, P-Sen, T-Sen, specificity or AUC.
+Every one of those requires ground truth: Dice needs a reference mask, P-Sen and
+specificity need to know whether the patient truly has a lesion, T-Sen needs
+annotated individual tumors, and AUC needs a labeled cohort rather than one
+scan. Inference gives you the two files above; the numbers below came from
+scoring them against PanTS-te ground truth.
+
+## Visual inspection
+
+To look at a result, open the source CT and both outputs in
+[3D Slicer](https://www.slicer.org/) or
+[ITK-SNAP](http://www.itksnap.org/):
+
+- load the source CT as the background volume;
+- load `combined_labels.nii.gz` as a segmentation/label overlay;
+- load `pancreatic_lesion_probability.nii.gz` as a scalar volume and display it
+  as a heatmap to see sub-threshold evidence the hard map discards.
+
+All three share one geometry, so they align without any registration step. This
+is optional; nothing in the evaluation depends on it.
 
 ## PanTS-te result
 

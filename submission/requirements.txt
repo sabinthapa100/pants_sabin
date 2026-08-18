@@ -1,0 +1,23 @@
+# Minimal runtime for image-only inference with scripts/infer_segresnet.py.
+# Derived from the actual import graph of that script, not from the full
+# development environment.
+#
+# PyTorch is deliberately NOT listed. The correct wheel depends on your CPU/GPU,
+# platform and CUDA runtime, so install it first from
+# https://pytorch.org/get-started/locally/ and then run:
+#
+#     python -m pip install -r submission/requirements.txt
+#
+# Tested with PyTorch 2.13.0+cu126 on Python 3.11.
+
+numpy                 # arrays throughout the inference and postprocessing path
+nibabel               # reads the input CT and writes both NIfTI outputs
+monai==1.5.1          # SegResNet, the transform chain, sliding-window inference
+                      # pinned: architecture and transform semantics must match
+                      # the weights in best.pt
+scipy                 # scipy.ndimage.label finds the 26-connected class-28
+                      # components used by the frozen >= 0.6 lesion filter
+
+# Optional, not a scientific dependency: gdown, only if you want to fetch the
+# checkpoint from Google Drive on the command line.
+#   python -m pip install gdown
