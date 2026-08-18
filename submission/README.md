@@ -5,7 +5,7 @@ Kent State University
 <sthapa3@kent.edu>
 
 Repository: <https://github.com/sabinthapa100/pants_sabin>
-Final package tag: **`pants-submission-v2`**
+Final package tag: **`pants-submission-v3`**
 Inference code tag: `pants-submission-v1` (`72813b28`)
 Metric code tag: `pants-metrics-v1` (`b3fa3a9e`)
 Checkpoint: `best.pt`, SHA256 `54bbcf0ceb530fd929d352be11bc8d7b18d22c3925deb62d54fa3d6cfb4cef50`
@@ -85,3 +85,5 @@ PanTS-te was evaluated from tag `pants-submission-v1`, after the checkpoint, pre
 postprocessing rule and inference implementation were frozen. A later measurement-only pass
 from tag `pants-metrics-v1` added T-Sen and AUC; it changed no prediction and reproduced the
 original hard counts (104/151, 48/750, 92 overlap cases, DSC 0.300721) exactly.
+
+Research-use prototype; not intended for clinical diagnosis or clinical decision-making.
