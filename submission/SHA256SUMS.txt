@@ -1,4 +1,4 @@
 # Expected checksum for the PanTS submission checkpoint.
 # best.pt is NOT stored in this repository; it is delivered separately.
 # Verify after download with:  sha256sum -c SHA256SUMS.txt
-54bbcf0ceb530fd929d352be11bc8d7b18d22c3925deb62d54fa3d6cfb4cef50  best.pt
+54bbcf0ceb530fd929d352be11bc8d7b18d22c3925deb62d54fa3d6cfb4cef50  PanTS_run/segresnet_suprem/best.pt

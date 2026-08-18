@@ -12,7 +12,99 @@ initialization, followed by one frozen held-out PanTS-te evaluation.
 - PanTSMini distribution: <https://huggingface.co/datasets/BodyMaps/PanTSMini>
 - SuPreM code and weights: <https://github.com/MrGiovanni/SuPreM>
 
-**Run the model:** [installation and inference quick start](submission/README.md#quick-start)
+## Quick start
+
+The following commands run image-only inference with the submitted checkpoint. They do not
+download PanTS, prepare training data, or retrain the model.
+
+### Clone the frozen submission
+
+```bash
+git clone --branch pants-submission-v5 --depth 1 \
+  https://github.com/sabinthapa100/pants_sabin.git
+
+cd pants_sabin
+```
+
+### Create the environment
+
+```bash
+conda create -n pants python=3.11 -y
+conda activate pants
+python -m pip install --upgrade pip
+```
+
+Install a PyTorch build appropriate for the machine's CPU/GPU and CUDA environment using
+the official PyTorch installation selector:
+
+<https://pytorch.org/get-started/locally/>
+
+Then install the remaining inference dependencies:
+
+```bash
+python -m pip install -r submission/requirements.txt
+```
+
+The inference-only requirements are NumPy, nibabel, MONAI 1.5.1, and SciPy. PyTorch is
+installed separately because its wheel depends on the operating system and CUDA platform.
+
+### Download the trained checkpoint
+
+```bash
+mkdir -p PanTS_run/segresnet_suprem
+
+python -m pip install gdown
+
+gdown 1GnQuaOzr7ZMzAB67OmNg2h6eO7FYN4rm \
+  -O PanTS_run/segresnet_suprem/best.pt
+```
+
+Verify that the downloaded file is the checkpoint used for the reported results:
+
+```bash
+sha256sum -c submission/SHA256SUMS.txt
+```
+
+Expected output:
+
+```text
+PanTS_run/segresnet_suprem/best.pt: OK
+```
+
+### Run inference
+
+```bash
+python scripts/infer_segresnet.py \
+  --checkpoint PanTS_run/segresnet_suprem/best.pt \
+  --input /path/to/unseen_ct.nii.gz \
+  --output output/ \
+  --lesion-peak-probability 0.6 \
+  --lesion-probability
+```
+
+`--input` may be either one `.nii`/`.nii.gz` CT volume or a flat directory containing
+multiple CT volumes.
+
+For one input volume, the script writes:
+
+```text
+output/
+├── combined_labels.nii.gz
+└── pancreatic_lesion_probability.nii.gz
+```
+
+- `combined_labels.nii.gz` is a `uint8` semantic segmentation with class IDs 0–28.
+  Class 28 is the pancreatic lesion.
+- `pancreatic_lesion_probability.nii.gz` is the unfiltered class-28 softmax map stored as
+  `float32` in `[0,1]`.
+- Both outputs are restored to the input CT's shape, affine, and orientation.
+- A lesion-only binary mask is obtained with `combined_labels == 28`.
+
+An unlabeled CT produces predictions, not evaluation metrics. Dice, P-Sen, T-Sen,
+specificity, and AUC require reference labels from a labeled cohort.
+
+Detailed reviewer instructions are also available in
+[`submission/README.md`](submission/README.md).
 
 ## Data
 
@@ -40,14 +132,43 @@ predicted 32 classes where PanTS needs 29. All transferred weights remain traina
 
 ## Training
 
-64 epochs, 3,600 iterations per epoch, 230,400 optimizer updates. `DiceCELoss` (background
-excluded from the Dice term), AdamW lr 1e-4 / weight decay 1e-5, cosine learning-rate
-schedule, mixed precision. Best checkpoint at **epoch 59**, selected by deterministic
-whole-volume mean class-28 Dice over a fixed 227-case monitoring subset.
+The submitted checkpoint is the **SuPreM-initialized SegResNet**. A second SegResNet with
+random initialization was trained as a comparison. Both models used the same PanTS-tr fold,
+sampling strategy, augmentation, loss, optimizer, learning-rate schedule, validation procedure,
+and stopping horizon.
 
-Random and SuPreM used the same scientific training protocol. Random was trained on a Colab
-T4 and SuPreM on an RTX 4070 with different PyTorch/CUDA environments, so the comparison is
-**protocol-matched but not hardware-controlled**.
+| Parameter | Value |
+| --- | --- |
+| Training fold | Fold 0: 7,199 training / 1,801 validation scans |
+| Epochs | 64 |
+| Iterations per epoch | 3,600 |
+| Total optimizer updates | 230,400 |
+| Batch construction | 2 cases × 2 patches per case = 4 patches per iteration |
+| Patch size | 96 × 96 × 96 voxels |
+| Gradient accumulation | 1 |
+| Loss | MONAI `DiceCELoss`, with background excluded from the Dice term |
+| Optimizer | AdamW |
+| Initial learning rate | `1e-4` |
+| Weight decay | `1e-5` |
+| Schedule | Cosine annealing over 64 epochs |
+| Precision | Automatic mixed precision |
+| Seed | 317 |
+| Model selection | Whole-volume class-28 Dice on a fixed 227-case monitoring subset |
+| Validation cadence | Every 5 epochs |
+| Selected checkpoint | Epoch 59 |
+
+The expensive deterministic transforms were performed once and stored in a prepared full-volume
+cache. Tumor-aware patch sampling and intensity augmentation remained stochastic during training,
+so each epoch presented different patches and augmentations.
+
+The random-initialized model was trained on a Google Colab T4. The SuPreM-initialized model was
+trained on an NVIDIA RTX 4070 Laptop GPU with 8 GB VRAM. The scientific protocol was matched,
+but the hardware and PyTorch/CUDA environments were different; the comparison is therefore not
+a hardware-controlled ablation.
+
+The training entry point is [`scripts/train_segresnet.py`](scripts/train_segresnet.py), and the
+checkpoint contains the training configuration, Git commit, manifest hash, split hash, optimizer
+state, scheduler state, AMP scaler state, counters, and random-number-generator state.
 
 ## Development result
 
