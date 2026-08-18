@@ -5,7 +5,9 @@ Kent State University
 <sthapa3@kent.edu>
 
 Repository: <https://github.com/sabinthapa100/pants_sabin>
-Evaluated code tag: **`pants-submission-v1`**
+Final package tag: **`pants-submission-v2`**
+Inference code tag: `pants-submission-v1` (`72813b28`)
+Metric code tag: `pants-metrics-v1` (`b3fa3a9e`)
 Checkpoint: `best.pt`, SHA256 `54bbcf0ceb530fd929d352be11bc8d7b18d22c3925deb62d54fa3d6cfb4cef50`
 
 ## Model
@@ -52,29 +54,34 @@ Both are restored to the source CT shape, affine and orientation. Peak VRAM ~0.4
 
 ## PanTS-te result
 
-| | |
-| --- | ---: |
-| Cases | 901 (0 failures) |
-| Lesion-positive | 151 |
-| Lesion-negative | 750 |
-| P-Sen | 104/151 = 68.9% |
-| Specificity | 702/750 = 93.6% |
-| Mean lesion DSC on positive scans | 30.1% |
-| Positive spatial overlap | 92/151 = 60.9% |
+901 held-out scans: 151 lesion-positive, 750 lesion-negative, 0 failures.
 
-Definitions: **P-Sen** is the fraction of lesion-positive scans with at least one retained
-class-28 component, regardless of location. **Specificity** is the fraction of
-lesion-negative scans with no retained class-28 component. **Mean lesion DSC** is the mean
-class-28 Dice over lesion-positive scans.
+| Model | P-Sen | T-Sen | Spe | AUC | DSC |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SegResNet, SuPreM initialization | 68.9% | 57.8% | 93.6% | 0.862 | 30.1% |
 
-T-Sen and AUC were not calculated in this submission; the inference output includes the
-continuous lesion probability map.
+AUC 95% CI [0.821, 0.899], from 2000 stratified patient-level bootstrap resamples, seed 317.
+
+- **P-Sen / Spe** — frozen pmax >= 0.6 hard operating point. 104/151 and 702/750.
+- **T-Sen** — 26-connected, maximum-cardinality one-to-one any-overlap matching. 93/161.
+- **AUC** — maximum class-28 softmax from the source-restored probability map, resampled to
+  1-mm isotropic.
+- **DSC** — macro mean over lesion-positive scans.
+
+Supplementary: micro (pooled) DSC 50.2%; positive spatial overlap 92/151; zero-Dice scans
+59/151.
+
+The PanTS paper defines DSC, sensitivity, specificity and AUC but not P-Sen, T-Sen or any
+tumor-matching rule, and we found no public PanTS implementation specifying individual-tumor
+matching. The T-Sen matching rule and the AUC patient score are therefore ours, stated in
+full above so they can be reproduced or replaced with the official ones.
 
 ## Environment
 
 Python 3.11.15, PyTorch 2.13.0+cu126, MONAI 1.5.1, NumPy 2.4.6, SciPy 1.17.1,
 nibabel 5.4.2. Single NVIDIA RTX 4070 Laptop GPU (8 GB).
 
-PanTS-te was evaluated once, from tag `pants-submission-v1`, after the checkpoint,
-preprocessing, postprocessing rule, inference implementation and metric definitions were
-frozen.
+PanTS-te was evaluated from tag `pants-submission-v1`, after the checkpoint, preprocessing,
+postprocessing rule and inference implementation were frozen. A later measurement-only pass
+from tag `pants-metrics-v1` added T-Sen and AUC; it changed no prediction and reproduced the
+original hard counts (104/151, 48/750, 92 overlap cases, DSC 0.300721) exactly.

@@ -72,31 +72,40 @@ background. The continuous class-28 probability map is left unfiltered.
 
 ## PanTS-te result
 
+901 held-out scans: 151 lesion-positive, 750 lesion-negative, 0 failures.
+
+| Model | P-Sen | T-Sen | Spe | AUC | DSC |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SegResNet, SuPreM initialization | 68.9% | 57.8% | 93.6% | 0.862 | 30.1% |
+
+AUC 95% CI [0.821, 0.899], from 2000 stratified patient-level bootstrap resamples, seed 317.
+
+- **P-Sen / Spe** — frozen pmax >= 0.6 hard operating point. 104/151 and 702/750.
+- **T-Sen** — 26-connected, maximum-cardinality one-to-one any-overlap matching. 93/161.
+- **AUC** — maximum class-28 softmax from the source-restored probability map, resampled to
+  1-mm isotropic.
+- **DSC** — macro mean over lesion-positive scans.
+
+The PanTS paper defines DSC, sensitivity, specificity and AUC but not P-Sen, T-Sen or any
+tumor-matching rule, and no public PanTS implementation specifying individual-tumor matching
+was found. The T-Sen matching rule and the AUC patient score above are therefore ours, stated
+in full so they can be reproduced or replaced.
+
+Supplementary:
+
 | | |
 | --- | ---: |
-| Cases | 901 |
-| Lesion-positive | 151 |
-| Lesion-negative | 750 |
-| P-Sen | 104/151 = 68.9% |
-| Specificity | 702/750 = 93.6% |
-| Mean lesion DSC on positive scans | 30.1% |
-| Median lesion DSC | 17.6% |
-| Positive spatial overlap | 92/151 = 60.9% |
-| Prediction but zero overlap | 12/151 |
-| No lesion prediction | 47/151 |
+| micro (pooled) DSC | 50.2% |
+| positive spatial overlap | 92/151 |
+| zero-Dice scans | 59/151 |
+| median lesion DSC | 17.6% |
+| ground-truth tumors, matched / total | 93 / 161 |
+| prediction but zero overlap | 12/151 |
+| no lesion prediction | 47/151 |
 
-Definitions used here:
+![PanTS-te patient-level ROC](docs/figures/04_pants_te_roc.png)
 
-- **P-Sen** — fraction of lesion-positive scans with at least one retained class-28
-  component, regardless of location.
-- **Specificity** — fraction of lesion-negative scans with no retained class-28 component.
-- **Mean lesion DSC** — mean class-28 Dice over lesion-positive scans.
-
-T-Sen and AUC are not reported because this evaluation did not implement individual-tumor
-matching or a continuous patient-level score. The inference script outputs a source-geometry
-segmentation and continuous class-28 probability map for further evaluation.
-
-![held-out outcomes](docs/figures/02_heldout_failure_modes.png)
+![held-out outcomes on lesion-positive cases](docs/figures/02_heldout_failure_modes.png)
 
 ## Inference
 
@@ -121,8 +130,9 @@ SuPreM checkpoint.
 
 | | |
 | --- | --- |
-| Evaluated tag | `pants-submission-v1` |
-| Evaluated source SHA | `72813b288db26dd0f887fe9d29a007fa46bcc764` |
+| Inference code tag | `pants-submission-v1` (`72813b288db26dd0f887fe9d29a007fa46bcc764`) |
+| Metric code tag | `pants-metrics-v1` (`b3fa3a9e13db5510446c9847a7ddde3378f4e5dd`) |
+| Final package tag | `pants-submission-v2` |
 | Final checkpoint SHA256 | `54bbcf0ceb530fd929d352be11bc8d7b18d22c3925deb62d54fa3d6cfb4cef50` (epoch 59) |
 | Environment | Python 3.11.15, PyTorch 2.13.0+cu126, MONAI 1.5.1 |
 
@@ -134,7 +144,7 @@ Methods detail and data QC evidence: [METHODS_AND_QC.md](METHODS_AND_QC.md).
 - Different hardware/software environments between the two arms.
 - The 0.6 threshold was selected on fold 0.
 - Small-lesion performance remains weak.
-- No T-Sen or AUC calculation.
+- T-Sen matching and the AUC patient score are our definitions, not the benchmark's.
 - Probabilities are not calibrated.
 
 ## References
